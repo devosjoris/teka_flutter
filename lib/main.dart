@@ -74,45 +74,48 @@ class _MyHomePageState extends State<MyHomePage> {
       });
       return;
     }
-    NfcManager.instance.startSession(onDiscovered: (NfcTag tag) async {
-      try {
-        // ST25DV is ISO 15693, but nfc_manager exposes raw data
-        final ndef = Ndef.from(tag);
-        if (ndef == null) {
+    NfcManager.instance.startSession(
+      onDiscovered: (NfcTag tag) async {
+        try {
+          // ST25DV is ISO 15693, but nfc_manager exposes raw data
+          final ndef = Ndef.from(tag);
+          if (ndef == null) {
+            setState(() {
+              _nfcStatus = 'Tag is not NDEF formatted or not supported.';
+              _scanning = false;
+            });
+            NfcManager.instance.stopSession();
+            return;
+          }
+          await ndef.read();
+          final cachedMessage = ndef.cachedMessage;
+          if (cachedMessage == null) {
+            setState(() {
+              _nfcStatus = 'No NDEF message found.';
+              _scanning = false;
+            });
+            NfcManager.instance.stopSession();
+            return;
+          }
+          // For demo: show payload as hex string
+          final payloads = cachedMessage.records.map((r) => r.payload).toList();
+          String hexData = payloads.map((b) => b.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ')).join('\n');
           setState(() {
-            _nfcStatus = 'Tag is not NDEF formatted or not supported.';
+            _eepromData = hexData;
+            _nfcStatus = 'EEPROM data read!';
             _scanning = false;
           });
           NfcManager.instance.stopSession();
-          return;
-        }
-        await ndef.read();
-        final cachedMessage = ndef.cachedMessage;
-        if (cachedMessage == null) {
+        } catch (e) {
           setState(() {
-            _nfcStatus = 'No NDEF message found.';
+            _nfcStatus = 'Error reading tag: \$e';
             _scanning = false;
           });
-          NfcManager.instance.stopSession();
-          return;
+          NfcManager.instance.stopSession(errorMessageIos: e.toString());
         }
-        // For demo: show payload as hex string
-        final payloads = cachedMessage.records.map((r) => r.payload).toList();
-        String hexData = payloads.map((b) => b.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ')).join('\n');
-        setState(() {
-          _eepromData = hexData;
-          _nfcStatus = 'EEPROM data read!';
-          _scanning = false;
-        });
-        NfcManager.instance.stopSession();
-      } catch (e) {
-        setState(() {
-          _nfcStatus = 'Error reading tag: \$e';
-          _scanning = false;
-        });
-        NfcManager.instance.stopSession(errorMessage: e.toString());
-      }
-    });
+      },
+      pollingOptions: {NfcPollingOption.iso15693},
+    );
   }
 
   @override
