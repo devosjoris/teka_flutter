@@ -60,6 +60,73 @@ class _MyHomePageState extends State<MyHomePage> {
   String? _eepromData;
   bool _scanning = false;
 
+  // Config fields
+  String _userName = '';
+  String _userCompany = '';
+  String _sensorSetting = 'low';
+
+  Future<void> _showConfigDialog() async {
+    final nameController = TextEditingController(text: _userName);
+    final companyController = TextEditingController(text: _userCompany);
+    String dropdownValue = _sensorSetting;
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Configuration'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(labelText: 'User Name'),
+              ),
+              TextField(
+                controller: companyController,
+                decoration: const InputDecoration(labelText: 'User Company'),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                value: dropdownValue,
+                decoration: const InputDecoration(labelText: 'Sensor Setting'),
+                items: const [
+                  DropdownMenuItem(value: 'low', child: Text('Low')),
+                  DropdownMenuItem(value: 'medium', child: Text('Medium')),
+                  DropdownMenuItem(value: 'high', child: Text('High')),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    dropdownValue = value;
+                  }
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {
+                  _userName = nameController.text;
+                  _userCompany = companyController.text;
+                  _sensorSetting = dropdownValue;
+                });
+                Navigator.of(context).pop();
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<void> _startNfcScan() async {
     setState(() {
       _nfcStatus = 'Scanning... Touch the ST25DV tag to the phone.';
@@ -120,12 +187,97 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+  // Helper to encode config as bytes for EEPROM
+  List<int> _buildConfigBytes() {
+    List<int> nameBytes = List.filled(50, 0);
+    List<int> companyBytes = List.filled(50, 0);
+    List<int> userNameBytes = _userName.codeUnits;
+    List<int> userCompanyBytes = _userCompany.codeUnits;
+    for (int i = 0; i < userNameBytes.length && i < 50; i++) {
+      nameBytes[i] = userNameBytes[i];
+    }
+    for (int i = 0; i < userCompanyBytes.length && i < 50; i++) {
+      companyBytes[i] = userCompanyBytes[i];
+    }
+    int sensorSettingByte = 0;
+    switch (_sensorSetting) {
+      case 'low':
+        sensorSettingByte = 0;
+        break;
+      case 'medium':
+        sensorSettingByte = 1;
+        break;
+      case 'high':
+        sensorSettingByte = 2;
+        break;
+    }
+    return [...nameBytes, ...companyBytes, sensorSettingByte];
+  }
+
+  Future<void> _uploadConfigToNfc() async {
+    setState(() {
+      _nfcStatus = 'Ready to upload config. Touch the ST25DV tag to the phone.';
+      _scanning = true;
+    });
+    bool isAvailable = await NfcManager.instance.isAvailable();
+    if (!isAvailable) {
+      setState(() {
+        _nfcStatus = 'NFC is not available on this device.';
+        _scanning = false;
+      });
+      return;
+    }
+    NfcManager.instance.startSession(
+      onDiscovered: (NfcTag tag) async {
+        try {
+          final ndef = Ndef.from(tag);
+          if (ndef == null || !ndef.isWritable) {
+            setState(() {
+              _nfcStatus = 'Tag is not NDEF writable or not supported.';
+              _scanning = false;
+            });
+            NfcManager.instance.stopSession();
+            return;
+          }
+          List<int> configBytes = _buildConfigBytes();
+          // final record = NdefRecord(
+          //   typeNameFormat: NdefTypeNameFormat.empty, // changed from .unknown
+          //   type: [],
+          //   identifier: [],
+          //   payload: configBytes,
+          // );
+          // final message = NdefMessage([record]);
+          // await ndef.write(message);
+          setState(() {
+            _nfcStatus = 'Config uploaded to NFC!';
+            _scanning = false;
+          });
+          NfcManager.instance.stopSession();
+        } catch (e, stack) {
+          setState(() {
+            _nfcStatus = 'Error uploading config: \$e';
+            _scanning = false;
+          });
+          NfcManager.instance.stopSession(errorMessageIos: e.toString());
+        }
+      },
+      pollingOptions: {NfcPollingOption.iso15693},
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         title: Text(widget.title),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Config',
+            onPressed: _showConfigDialog,
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
@@ -133,6 +285,18 @@ class _MyHomePageState extends State<MyHomePage> {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // Show config summary if set
+            if (_userName.isNotEmpty || _userCompany.isNotEmpty)
+              Column(
+                children: [
+                  if (_userName.isNotEmpty)
+                    Text('User Name: $_userName', textAlign: TextAlign.center),
+                  if (_userCompany.isNotEmpty)
+                    Text('User Company: $_userCompany', textAlign: TextAlign.center),
+                  Text('Sensor Setting: ${_sensorSetting[0].toUpperCase()}${_sensorSetting.substring(1)}', textAlign: TextAlign.center),
+                  const SizedBox(height: 24),
+                ],
+              ),
             Text(_nfcStatus, textAlign: TextAlign.center),
             const SizedBox(height: 24),
             if (_eepromData != null) ...[
@@ -147,6 +311,12 @@ class _MyHomePageState extends State<MyHomePage> {
               onPressed: _scanning ? null : _startNfcScan,
               icon: const Icon(Icons.nfc),
               label: const Text('Start NFC Scan'),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _scanning ? null : _uploadConfigToNfc,
+              icon: const Icon(Icons.upload),
+              label: const Text('Upload Config to NFC'),
             ),
           ],
         ),
