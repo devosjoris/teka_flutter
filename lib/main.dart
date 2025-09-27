@@ -106,7 +106,9 @@ class _MyHomePageState extends State<MyHomePage> {
             _scanning = false;
           });
           NfcManager.instance.stopSession();
-        } catch (e) {
+        } catch (e, stack) {
+          // print('NFC read error: $e');
+          // print('Stack trace: $stack');
           setState(() {
             _nfcStatus = 'Error reading tag: \$e';
             _scanning = false;
