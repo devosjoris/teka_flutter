@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:nfc_manager/nfc_manager.dart';
-import 'package:nfc_manager_ndef/nfc_manager_ndef.dart';
+import 'package:nfc_manager/nfc_manager.dart' as nfc;
+import 'package:nfc_manager_ndef/nfc_manager_ndef.dart' as ndef;
+import 'dart:typed_data';
+import 'dart:convert';
+import 'package:nfc_manager/ndef_record.dart' as ndefrec;
 
 void main() {
   runApp(const MyApp());
@@ -133,7 +136,7 @@ class _MyHomePageState extends State<MyHomePage> {
       _eepromData = null;
       _scanning = true;
     });
-    bool isAvailable = await NfcManager.instance.isAvailable();
+  bool isAvailable = await nfc.NfcManager.instance.isAvailable();
     if (!isAvailable) {
       setState(() {
         _nfcStatus = 'NFC is not available on this device.';
@@ -141,27 +144,27 @@ class _MyHomePageState extends State<MyHomePage> {
       });
       return;
     }
-    NfcManager.instance.startSession(
-      onDiscovered: (NfcTag tag) async {
+    nfc.NfcManager.instance.startSession(
+      onDiscovered: (nfc.NfcTag tag) async {
         try {
           // ST25DV is ISO 15693, but nfc_manager exposes raw data
-          final ndef = Ndef.from(tag);
-          if (ndef == null) {
+          final ndefTag = ndef.Ndef.from(tag);
+          if (ndefTag == null) {
             setState(() {
               _nfcStatus = 'Tag is not NDEF formatted or not supported.';
               _scanning = false;
             });
-            NfcManager.instance.stopSession();
+            nfc.NfcManager.instance.stopSession();
             return;
           }
-          await ndef.read();
-          final cachedMessage = ndef.cachedMessage;
+          await ndefTag.read();
+          final cachedMessage = ndefTag.cachedMessage;
           if (cachedMessage == null) {
             setState(() {
               _nfcStatus = 'No NDEF message found.';
               _scanning = false;
             });
-            NfcManager.instance.stopSession();
+            nfc.NfcManager.instance.stopSession();
             return;
           }
           // For demo: show payload as hex string
@@ -172,18 +175,18 @@ class _MyHomePageState extends State<MyHomePage> {
             _nfcStatus = 'EEPROM data read!';
             _scanning = false;
           });
-          NfcManager.instance.stopSession();
-        } catch (e, stack) {
+          nfc.NfcManager.instance.stopSession();
+        } catch (e) {
           // print('NFC read error: $e');
           // print('Stack trace: $stack');
           setState(() {
-            _nfcStatus = 'Error reading tag: \$e';
+            _nfcStatus = 'Error reading tag: $e';
             _scanning = false;
           });
-          NfcManager.instance.stopSession(errorMessageIos: e.toString());
+          nfc.NfcManager.instance.stopSession(errorMessageIos: e.toString());
         }
       },
-      pollingOptions: {NfcPollingOption.iso15693},
+      pollingOptions: {nfc.NfcPollingOption.iso15693},
     );
   }
 
@@ -219,7 +222,7 @@ class _MyHomePageState extends State<MyHomePage> {
       _nfcStatus = 'Ready to upload config. Touch the ST25DV tag to the phone.';
       _scanning = true;
     });
-    bool isAvailable = await NfcManager.instance.isAvailable();
+  bool isAvailable = await nfc.NfcManager.instance.isAvailable();
     if (!isAvailable) {
       setState(() {
         _nfcStatus = 'NFC is not available on this device.';
@@ -227,41 +230,42 @@ class _MyHomePageState extends State<MyHomePage> {
       });
       return;
     }
-    NfcManager.instance.startSession(
-      onDiscovered: (NfcTag tag) async {
+    nfc.NfcManager.instance.startSession(
+      onDiscovered: (nfc.NfcTag tag) async {
         try {
-          final ndef = Ndef.from(tag);
-          if (ndef == null || !ndef.isWritable) {
+          final ndefTag = ndef.Ndef.from(tag);
+          if (ndefTag == null || !ndefTag.isWritable) {
             setState(() {
               _nfcStatus = 'Tag is not NDEF writable or not supported.';
               _scanning = false;
             });
-            NfcManager.instance.stopSession();
+            nfc.NfcManager.instance.stopSession();
             return;
           }
           List<int> configBytes = _buildConfigBytes();
-          // final record = NdefRecord(
-          //   typeNameFormat: NdefTypeNameFormat.empty, // changed from .unknown
-          //   type: [],
-          //   identifier: [],
-          //   payload: configBytes,
-          // );
-          // final message = NdefMessage([record]);
-          // await ndef.write(message);
+          // Write raw config bytes as an NDEF media (MIME) record.
+          final record = ndefrec.NdefRecord(
+            typeNameFormat: ndefrec.TypeNameFormat.media,
+            type: Uint8List.fromList(ascii.encode('application/octet-stream')),
+            identifier: Uint8List(0),
+            payload: Uint8List.fromList(configBytes),
+          );
+          final message = ndefrec.NdefMessage(records: [record]);
+          await ndefTag.write(message: message);
           setState(() {
             _nfcStatus = 'Config uploaded to NFC!';
             _scanning = false;
           });
-          NfcManager.instance.stopSession();
-        } catch (e, stack) {
+          nfc.NfcManager.instance.stopSession();
+        } catch (e) {
           setState(() {
-            _nfcStatus = 'Error uploading config: \$e';
+            _nfcStatus = 'Error uploading config: $e';
             _scanning = false;
           });
-          NfcManager.instance.stopSession(errorMessageIos: e.toString());
+          nfc.NfcManager.instance.stopSession(errorMessageIos: e.toString());
         }
       },
-      pollingOptions: {NfcPollingOption.iso15693},
+      pollingOptions: {nfc.NfcPollingOption.iso15693},
     );
   }
 
