@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:nfc_manager/nfc_manager.dart' as nfc;
 import 'package:nfc_manager_ndef/nfc_manager_ndef.dart' as ndef;
+import 'package:nfc_manager/nfc_manager_android.dart' as android;
+// import 'package:nfc_manager/nfc_manager_ios.dart' as ios;
 import 'dart:typed_data';
 import 'dart:convert';
 import 'package:nfc_manager/ndef_record.dart' as ndefrec;
@@ -147,43 +149,69 @@ class _MyHomePageState extends State<MyHomePage> {
     nfc.NfcManager.instance.startSession(
       onDiscovered: (nfc.NfcTag tag) async {
         try {
-          // ST25DV is ISO 15693, but nfc_manager exposes raw data
+          // Prefer raw ISO15693/NfcV reads to avoid NDEF overhead
+          // Read 128 bytes (adjust as needed)
+          const int length = 128;
+          const int startBlock = 0;
+          const int blockSize = 4;
+
+          // final ios15693 = ios.Iso15693Ios.from(tag);
+          // if (ios15693 != null) {
+          //   final data = await _readIso15693Ios(ios15693, length: length, startBlock: startBlock, blockSize: blockSize);
+          //   final hex = data.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ');
+          //   setState(() {
+          //     _eepromData = hex;
+          //     _nfcStatus = 'EEPROM data read (ISO15693 iOS raw).';
+          //     _scanning = false;
+          //   });
+          //   await nfc.NfcManager.instance.stopSession();
+          //   return;
+          // }
+
+          final vAndroid = android.NfcVAndroid.from(tag);
+          if (vAndroid != null) {
+            final uid = vAndroid.tag.id; // 8-byte UID
+            final data = await _readNfcVAndroid(vAndroid, uid, length: length, startBlock: startBlock, blockSize: blockSize);
+            final hex = data.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ');
+            setState(() {
+              _eepromData = hex;
+              _nfcStatus = 'EEPROM data read (NFC-V Android raw).';
+              _scanning = false;
+            });
+            await nfc.NfcManager.instance.stopSession();
+            return;
+          }
+
+          // Fallback to NDEF if raw path not available
           final ndefTag = ndef.Ndef.from(tag);
-          if (ndefTag == null) {
+          if (ndefTag != null) {
+            final msg = await ndefTag.read();
+            final payloads = msg?.records.map((r) => r.payload).toList() ?? [];
+            if (payloads.isEmpty) {
+              setState(() {
+                _nfcStatus = 'No NDEF message found.';
+                _scanning = false;
+              });
+              await nfc.NfcManager.instance.stopSession();
+              return;
+            }
+            final hexData = payloads.map((b) => b.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ')).join('\n');
             setState(() {
-              _nfcStatus = 'Tag is not NDEF formatted or not supported.';
+              _eepromData = hexData;
+              _nfcStatus = 'NDEF data read (fallback).';
               _scanning = false;
             });
-            nfc.NfcManager.instance.stopSession();
+            await nfc.NfcManager.instance.stopSession();
             return;
           }
-          await ndefTag.read();
-          final cachedMessage = ndefTag.cachedMessage;
-          if (cachedMessage == null) {
-            setState(() {
-              _nfcStatus = 'No NDEF message found.';
-              _scanning = false;
-            });
-            nfc.NfcManager.instance.stopSession();
-            return;
-          }
-          // For demo: show payload as hex string
-          final payloads = cachedMessage.records.map((r) => r.payload).toList();
-          String hexData = payloads.map((b) => b.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ')).join('\n');
-          setState(() {
-            _eepromData = hexData;
-            _nfcStatus = 'EEPROM data read!';
-            _scanning = false;
-          });
-          nfc.NfcManager.instance.stopSession();
+
+          throw Exception('Tag does not support ISO15693/NfcV or NDEF read.');
         } catch (e) {
-          // print('NFC read error: $e');
-          // print('Stack trace: $stack');
           setState(() {
             _nfcStatus = 'Error reading tag: $e';
             _scanning = false;
           });
-          nfc.NfcManager.instance.stopSession(errorMessageIos: e.toString());
+          await nfc.NfcManager.instance.stopSession(errorMessageIos: e.toString());
         }
       },
       pollingOptions: {nfc.NfcPollingOption.iso15693},
@@ -233,40 +261,181 @@ class _MyHomePageState extends State<MyHomePage> {
     nfc.NfcManager.instance.startSession(
       onDiscovered: (nfc.NfcTag tag) async {
         try {
-          final ndefTag = ndef.Ndef.from(tag);
-          if (ndefTag == null || !ndefTag.isWritable) {
+          // Build raw config bytes to write directly to EEPROM
+          final data = Uint8List.fromList(_buildConfigBytes());
+
+          // Prefer platform ISO15693/NfcV access to avoid NDEF overhead
+          // final ios15693 = ios.Iso15693Ios.from(tag);
+          // if (ios15693 != null) {
+          //   await _writeIso15693Ios(ios15693, data, startBlock: 0, blockSize: 4);
+          //   setState(() {
+          //     _nfcStatus = 'Config written (ISO15693 iOS raw).';
+          //     _scanning = false;
+          //   });
+          //   await nfc.NfcManager.instance.stopSession();
+          //   return;
+          // }
+
+          final vAndroid = android.NfcVAndroid.from(tag);
+          if (vAndroid != null) {
+            final uid = vAndroid.tag.id; // 8-byte UID
+            await _writeNfcVAndroid(vAndroid, uid, data, startBlock: 0, blockSize: 4);
             setState(() {
-              _nfcStatus = 'Tag is not NDEF writable or not supported.';
+              _nfcStatus = 'Config written (NFC-V Android raw).';
               _scanning = false;
             });
-            nfc.NfcManager.instance.stopSession();
+            await nfc.NfcManager.instance.stopSession();
             return;
           }
-          List<int> configBytes = _buildConfigBytes();
-          // Write raw config bytes as an NDEF media (MIME) record.
-          final record = ndefrec.NdefRecord(
-            typeNameFormat: ndefrec.TypeNameFormat.media,
-            type: Uint8List.fromList(ascii.encode('application/octet-stream')),
-            identifier: Uint8List(0),
-            payload: Uint8List.fromList(configBytes),
-          );
-          final message = ndefrec.NdefMessage(records: [record]);
-          await ndefTag.write(message: message);
-          setState(() {
-            _nfcStatus = 'Config uploaded to NFC!';
-            _scanning = false;
-          });
-          nfc.NfcManager.instance.stopSession();
+
+          // Fallback: NDEF (if nothing else available)
+          final ndefTag = ndef.Ndef.from(tag);
+          if (ndefTag != null && ndefTag.isWritable) {
+            final record = ndefrec.NdefRecord(
+              typeNameFormat: ndefrec.TypeNameFormat.media,
+              type: Uint8List.fromList(ascii.encode('application/octet-stream')),
+              identifier: Uint8List(0),
+              payload: data,
+            );
+            final message = ndefrec.NdefMessage(records: [record]);
+            await ndefTag.write(message: message);
+            setState(() {
+              _nfcStatus = 'Config written via NDEF (fallback).';
+              _scanning = false;
+            });
+            await nfc.NfcManager.instance.stopSession();
+            return;
+          }
+
+          throw Exception('Tag does not support ISO15693/NfcV or NDEF write.');
         } catch (e) {
           setState(() {
             _nfcStatus = 'Error uploading config: $e';
             _scanning = false;
           });
-          nfc.NfcManager.instance.stopSession(errorMessageIos: e.toString());
+          await nfc.NfcManager.instance.stopSession(errorMessageIos: e.toString());
         }
       },
       pollingOptions: {nfc.NfcPollingOption.iso15693},
     );
+  }
+
+  // Write raw bytes to ISO15693 tag on iOS in consecutive 4-byte blocks starting at startBlock.
+  // Future<void> _writeIso15693Ios(
+  //   ios.Iso15693Ios tag,
+  //   Uint8List data, {
+  //   int startBlock = 0,
+  //   int blockSize = 4,
+  // }) async {
+  //   final flags = <ios.Iso15693RequestFlagIos>{
+  //     ios.Iso15693RequestFlagIos.highDataRate,
+  //     ios.Iso15693RequestFlagIos.address,
+  //   };
+  //   final totalBlocks = (data.length + blockSize - 1) ~/ blockSize;
+  //   for (int i = 0; i < totalBlocks; i++) {
+  //     final offset = i * blockSize;
+  //     final chunk = Uint8List(blockSize);
+  //     for (int j = 0; j < blockSize; j++) {
+  //       final src = offset + j;
+  //       chunk[j] = src < data.length ? data[src] : 0;
+  //     }
+  //     await tag.writeSingleBlock(
+  //       requestFlags: flags,
+  //       blockNumber: startBlock + i,
+  //       dataBlock: chunk,
+  //     );
+  //   }
+  // }
+
+  // Write raw bytes to ISO15693 tag on Android using NfcV transceive (addressed mode, 4-byte blocks).
+  Future<void> _writeNfcVAndroid(
+    android.NfcVAndroid v,
+    Uint8List uid,
+    Uint8List data, {
+    int startBlock = 0,
+    int blockSize = 4,
+  }) async {
+    // ISO15693 Flags: addressed (0x20) + high data rate (0x02)
+    const int flags = 0x22;
+    const int cmdWriteSingleBlock = 0x21; // ISO15693 Write Single Block
+
+    final totalBlocks = (data.length + blockSize - 1) ~/ blockSize;
+    for (int i = 0; i < totalBlocks; i++) {
+      final offset = i * blockSize;
+      final block = Uint8List(blockSize);
+      for (int j = 0; j < blockSize; j++) {
+        final k = offset + j;
+        block[j] = k < data.length ? data[k] : 0;
+      }
+
+      // Frame: FLAGS | CMD | UID(8) | BLOCK# | DATA(blockSize)
+      final frame = BytesBuilder();
+      frame.add([flags, cmdWriteSingleBlock]);
+      frame.add(uid); // Many devices accept id as-is; adjust endianness if required by your tag
+      frame.add([startBlock + i]);
+      frame.add(block);
+
+      final response = await v.transceive(frame.toBytes());
+      // Optional: check response[0] == 0x00 (success) per ISO15693 response format
+      if (response.isEmpty || response[0] != 0x00) {
+        throw Exception('Write block ${startBlock + i} failed (resp: ${response.map((b)=>b.toRadixString(16).padLeft(2,'0')).join(' ')})');
+      }
+    }
+  }
+
+  // Read raw bytes from ISO15693 tag on iOS.
+  // Future<Uint8List> _readIso15693Ios(
+  //   ios.Iso15693Ios tag, {
+  //   required int length,
+  //   int startBlock = 0,
+  //   int blockSize = 4,
+  // }) async {
+  //   final flags = <ios.Iso15693RequestFlagIos>{
+  //     ios.Iso15693RequestFlagIos.highDataRate,
+  //     ios.Iso15693RequestFlagIos.address,
+  //   };
+  //   final blocksToRead = (length + blockSize - 1) ~/ blockSize;
+  //   // Try multi-block read for efficiency
+  //   final blocks = await tag.readMultipleBlocks(
+  //     requestFlags: flags,
+  //     blockNumber: startBlock,
+  //     numberOfBlocks: blocksToRead,
+  //   );
+  //   final buf = BytesBuilder();
+  //   for (final b in blocks) {
+  //     buf.add(b);
+  //   }
+  //   final bytes = buf.toBytes();
+  //   return Uint8List.fromList(bytes.take(length).toList());
+  // }
+
+  // Read raw bytes from ISO15693 tag on Android using NfcV transceive.
+  Future<Uint8List> _readNfcVAndroid(
+    android.NfcVAndroid v,
+    Uint8List uid, {
+    required int length,
+    int startBlock = 0,
+    int blockSize = 4,
+  }) async {
+    // Flags: addressed + high data rate
+    const int flags = 0x22;
+    const int cmdReadSingleBlock = 0x20; // ISO15693 Read Single Block
+    final blocksToRead = (length + blockSize - 1) ~/ blockSize;
+    final out = BytesBuilder();
+    for (int i = 0; i < blocksToRead; i++) {
+      final frame = BytesBuilder();
+      frame.add([flags, cmdReadSingleBlock]);
+      frame.add(uid);
+      frame.add([startBlock + i]);
+      final resp = await v.transceive(frame.toBytes());
+      if (resp.isEmpty || resp[0] != 0x00) {
+        throw Exception('Read block ${startBlock + i} failed (resp: ${resp.map((b)=>b.toRadixString(16).padLeft(2,'0')).join(' ')})');
+      }
+      // Skip status byte (0x00) and append block data
+      out.add(resp.sublist(1));
+    }
+    final bytes = out.toBytes();
+    return Uint8List.fromList(bytes.take(length).toList());
   }
 
   @override
