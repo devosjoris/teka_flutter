@@ -220,6 +220,15 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // Helper to encode config as bytes for EEPROM
   List<int> _buildConfigBytes() {
+    // First 4 bytes: Unix timestamp (seconds since epoch), big-endian
+    final int ts = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final List<int> timestampBytes = [
+      (ts >> 24) & 0xFF,
+      (ts >> 16) & 0xFF,
+      (ts >> 8) & 0xFF,
+      ts & 0xFF,
+    ];
+
     List<int> nameBytes = List.filled(50, 0);
     List<int> companyBytes = List.filled(50, 0);
     List<int> userNameBytes = _userName.codeUnits;
@@ -242,7 +251,7 @@ class _MyHomePageState extends State<MyHomePage> {
         sensorSettingByte = 2;
         break;
     }
-    return [...nameBytes, ...companyBytes, sensorSettingByte];
+    return [...timestampBytes, ...nameBytes, ...companyBytes, sensorSettingByte];
   }
 
   Future<void> _uploadConfigToNfc() async {
