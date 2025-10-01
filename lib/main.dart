@@ -6,6 +6,7 @@ import 'package:nfc_manager/nfc_manager_android.dart' as android;
 import 'dart:typed_data';
 import 'dart:convert';
 import 'package:nfc_manager/ndef_record.dart' as ndefrec;
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const MyApp());
@@ -70,6 +71,12 @@ class _MyHomePageState extends State<MyHomePage> {
   String _userCompany = '';
   String _sensorSetting = 'low';
 
+  @override
+  void initState() {
+    super.initState();
+    _loadConfigFromStorage();
+  }
+
   Future<void> _showConfigDialog() async {
     final nameController = TextEditingController(text: _userName);
     final companyController = TextEditingController(text: _userCompany);
@@ -122,6 +129,7 @@ class _MyHomePageState extends State<MyHomePage> {
                   _userCompany = companyController.text;
                   _sensorSetting = dropdownValue;
                 });
+                _saveConfigToStorage();
                 Navigator.of(context).pop();
               },
               child: const Text('Save'),
@@ -216,6 +224,23 @@ class _MyHomePageState extends State<MyHomePage> {
       },
       pollingOptions: {nfc.NfcPollingOption.iso15693},
     );
+  }
+
+  // Persist user config locally
+  Future<void> _saveConfigToStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('userName', _userName);
+    await prefs.setString('userCompany', _userCompany);
+    await prefs.setString('sensorSetting', _sensorSetting);
+  }
+
+  Future<void> _loadConfigFromStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _userName = prefs.getString('userName') ?? _userName;
+      _userCompany = prefs.getString('userCompany') ?? _userCompany;
+      _sensorSetting = prefs.getString('sensorSetting') ?? _sensorSetting;
+    });
   }
 
   // Helper to encode config as bytes for EEPROM
