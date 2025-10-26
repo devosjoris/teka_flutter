@@ -69,10 +69,14 @@ class _MyHomePageState extends State<MyHomePage> {
   static const int MEM_VAL_MEASURE_MODE = 16; // 4 bytes (block 4)
   static const int MEM_VAL_USER_NAME_LENGTH = 44; // 4 bytes (block 11)
   static const int MEM_VAL_USER_NAME = 48; // 30 bytes (blocks 12..19)
+  static const int MEM_VAL_WARNING_LEVEL = 80; // 4 bytes (block 20)
+  static const int MEM_VAL_MAX_LEVEL = 84; // 4 bytes (block 21)
 
   // Config fields
   String _userName = '';
   int _measureMode = 0; // 0 or 1
+  int _warningLevel = 0; // ug/m3
+  int _maxLevel = 0; // ug/m3
 
   @override
   void initState() {
@@ -83,6 +87,8 @@ class _MyHomePageState extends State<MyHomePage> {
   // Simple settings dialog for measure mode and user name
   Future<void> _openSettings() async {
     final nameController = TextEditingController(text: _userName);
+    final warningController = TextEditingController(text: _warningLevel.toString());
+    final maxController = TextEditingController(text: _maxLevel.toString());
     int tempMode = _measureMode;
     await showDialog(
       context: context,
@@ -102,10 +108,26 @@ class _MyHomePageState extends State<MyHomePage> {
                 value: tempMode,
                 decoration: const InputDecoration(labelText: 'Measure Mode'),
                 items: const [
-                  DropdownMenuItem(value: 0, child: Text('0')),
-                  DropdownMenuItem(value: 1, child: Text('1')),
+                  DropdownMenuItem(value: 0, child: Text('1 minute refresh')),
+                  DropdownMenuItem(value: 1, child: Text('5 minutes refresh')),
                 ],
                 onChanged: (v) => tempMode = v ?? 0,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: warningController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Warning level (ug/m³, < 5000)',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: maxController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Max level (ug/m³, < 7000)',
+                ),
               ),
             ],
           ),
@@ -116,9 +138,45 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
             ElevatedButton(
               onPressed: () async {
+                // Parse and validate
+                final name = nameController.text.trim();
+                final warn = int.tryParse(warningController.text.trim()) ?? -1;
+                final maxv = int.tryParse(maxController.text.trim()) ?? -1;
+                if (maxv <= 0 || maxv > 7000) {
+                  await showDialog(
+                    context: context,
+                    builder: (_) => const AlertDialog(
+                      title: Text('Invalid Max level'),
+                      content: Text('Max level must be a positive integer below 7000.'),
+                    ),
+                  );
+                  return;
+                }
+                if (warn < 0 || warn > 5000) {
+                  await showDialog(
+                    context: context,
+                    builder: (_) => const AlertDialog(
+                      title: Text('Invalid Warning level'),
+                      content: Text('Warning level must be a non-negative integer below 5000.'),
+                    ),
+                  );
+                  return;
+                }
+                if (warn >= maxv) {
+                  await showDialog(
+                    context: context,
+                    builder: (_) => const AlertDialog(
+                      title: Text('Invalid levels'),
+                      content: Text('Warning level must be less than Max level.'),
+                    ),
+                  );
+                  return;
+                }
                 setState(() {
-                  _userName = nameController.text.trim();
+                  _userName = name;
                   _measureMode = tempMode;
+                  _warningLevel = warn;
+                  _maxLevel = maxv;
                 });
                 await _saveConfigToStorage();
                 if (context.mounted) Navigator.pop(context);
@@ -213,6 +271,8 @@ class _MyHomePageState extends State<MyHomePage> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('userName', _userName);
     await prefs.setInt('measureMode', _measureMode);
+    await prefs.setInt('warningLevel', _warningLevel);
+    await prefs.setInt('maxLevel', _maxLevel);
   }
 
   Future<void> _loadConfigFromStorage() async {
@@ -220,6 +280,8 @@ class _MyHomePageState extends State<MyHomePage> {
     setState(() {
       _userName = prefs.getString('userName') ?? '';
       _measureMode = prefs.getInt('measureMode') ?? 0;
+      _warningLevel = prefs.getInt('warningLevel') ?? 0;
+      _maxLevel = prefs.getInt('maxLevel') ?? 0;
     });
   }
 
@@ -302,6 +364,22 @@ class _MyHomePageState extends State<MyHomePage> {
                 blockSize: 4,
               );
             }
+            // Write WARNING_LEVEL (4 bytes) at offset 80 (block 20)
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_be32(_warningLevel)),
+              startBlock: MEM_VAL_WARNING_LEVEL ~/ 4,
+              blockSize: 4,
+            );
+            // Write MAX_LEVEL (4 bytes) at offset 84 (block 21)
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_be32(_maxLevel)),
+              startBlock: MEM_VAL_MAX_LEVEL ~/ 4,
+              blockSize: 4,
+            );
             setState(() {
               _nfcStatus = 'Config written (NFC-V Android raw, memory map).';
               _scanning = false;
@@ -317,6 +395,8 @@ class _MyHomePageState extends State<MyHomePage> {
               ..._be32(_measureMode),
               ..._be32(nameLen),
               ...nameBytes,
+              ..._be32(_warningLevel),
+              ..._be32(_maxLevel),
             ]);
             final record = ndefrec.NdefRecord(
               typeNameFormat: ndefrec.TypeNameFormat.media,
@@ -486,12 +566,16 @@ class _MyHomePageState extends State<MyHomePage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Show config summary if set
-            if (_userName.isNotEmpty)
+            if (_userName.isNotEmpty || _warningLevel > 0 || _maxLevel > 0)
               Column(
                 children: [
-                  if (_userName.isNotEmpty)
-                    Text('User Name: $_userName', textAlign: TextAlign.center),
-                  Text('Measure Mode: $_measureMode', textAlign: TextAlign.center),
+                  if (_userName.isNotEmpty) Text('User Name: $_userName', textAlign: TextAlign.center),
+                    Text(
+                    'Measure Mode: ${_measureMode == 0 ? '1 minute refresh' : '5 minutes refresh'}',
+                    textAlign: TextAlign.center,
+                    ),
+                  Text('Warning Level: $_warningLevel ug/m³', textAlign: TextAlign.center),
+                  Text('Max Level: $_maxLevel ug/m³', textAlign: TextAlign.center),
                   const SizedBox(height: 24),
                 ],
               ),
