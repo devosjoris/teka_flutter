@@ -1,11 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:nfc_manager/nfc_manager.dart' as nfc;
-import 'package:nfc_manager_ndef/nfc_manager_ndef.dart' as ndef;
 import 'package:nfc_manager/nfc_manager_android.dart' as android;
-// import 'package:nfc_manager/nfc_manager_ios.dart' as ios;
 import 'dart:typed_data';
 import 'dart:convert';
-import 'package:nfc_manager/ndef_record.dart' as ndefrec;
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -71,12 +68,24 @@ class _MyHomePageState extends State<MyHomePage> {
   static const int MEM_VAL_USER_NAME = 48; // 30 bytes (blocks 12..19)
   static const int MEM_VAL_WARNING_LEVEL = 80; // 4 bytes (block 20)
   static const int MEM_VAL_MAX_LEVEL = 84; // 4 bytes (block 21)
+  static const int MEM_PTR_LAST_WRITE = 8; // 4 bytes (block 2)
 
   // Config fields
   String _userName = '';
   int _measureMode = 0; // 0 or 1
   int _warningLevel = 0; // ug/m3
   int _maxLevel = 0; // ug/m3
+  int? _lastWriteAddress; // discovered address of magic marker
+
+  // Big-endian helpers
+  List<int> _be32(int v) => [
+        (v >> 24) & 0xFF,
+        (v >> 16) & 0xFF,
+        (v >> 8) & 0xFF,
+        v & 0xFF,
+      ];
+  int _u32be(Uint8List b, [int off = 0]) =>
+      (b[off] << 24) | (b[off + 1] << 16) | (b[off + 2] << 8) | b[off + 3];
 
   @override
   void initState() {
@@ -191,13 +200,13 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // _showConfigDialog removed; use _openSettings instead.
 
-  Future<void> _startNfcScan() async {
+  Future<void> _connectToSensor() async {
     setState(() {
-      _nfcStatus = 'Scanning... Touch the ST25DV tag to the phone.';
+      _nfcStatus = 'Connecting... Touch the ST25DV tag to the phone.';
       _eepromData = null;
       _scanning = true;
     });
-    bool isAvailable = await nfc.NfcManager.instance.isAvailable();
+    final isAvailable = await nfc.NfcManager.instance.isAvailable();
     if (!isAvailable) {
       setState(() {
         _nfcStatus = 'NFC is not available on this device.';
@@ -206,65 +215,192 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
     nfc.NfcManager.instance.startSession(
+      pollingOptions: {nfc.NfcPollingOption.iso15693},
       onDiscovered: (nfc.NfcTag tag) async {
         try {
-          // Prefer raw ISO15693/NfcV reads to avoid NDEF overhead
-          // Read 128 bytes (adjust as needed)
-          const int length = 128;
-          const int startBlock = 0;
-          const int blockSize = 4;
-
-      // iOS raw path can be added here if required
-
           final vAndroid = android.NfcVAndroid.from(tag);
-          if (vAndroid != null) {
-            final uid = vAndroid.tag.id; // 8-byte UID
-            final data = await _readNfcVAndroid(vAndroid, uid, length: length, startBlock: startBlock, blockSize: blockSize);
-            final hex = data.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ');
-            setState(() {
-              _eepromData = hex;
-              _nfcStatus = 'EEPROM data read (NFC-V Android raw).';
-              _scanning = false;
-            });
-            await nfc.NfcManager.instance.stopSession();
-            return;
+          if (vAndroid == null) {
+            throw Exception('ISO15693 (NFC-V) not available; cannot read raw memory.');
+          }
+          final uid = vAndroid.tag.id;
+
+          // 1) Read current values from sensor
+          final mmBytes = await _readNfcVAndroid(
+            vAndroid,
+            uid,
+            length: 4,
+            startBlock: MEM_VAL_MEASURE_MODE ~/ 4,
+          );
+          final mmTag = _u32be(mmBytes);
+
+          final nameLenBytes = await _readNfcVAndroid(
+            vAndroid,
+            uid,
+            length: 4,
+            startBlock: MEM_VAL_USER_NAME_LENGTH ~/ 4,
+          );
+          int nameLenTag = _u32be(nameLenBytes);
+          if (nameLenTag < 0) nameLenTag = 0;
+          if (nameLenTag > 30) nameLenTag = 30;
+          final paddedNameLen = ((nameLenTag + 3) ~/ 4) * 4;
+          String nameTag = '';
+          if (nameLenTag > 0) {
+            final nameBytes = await _readNfcVAndroid(
+              vAndroid,
+              uid,
+              length: paddedNameLen,
+              startBlock: MEM_VAL_USER_NAME ~/ 4,
+            );
+            nameTag = utf8.decode(nameBytes.sublist(0, nameLenTag), allowMalformed: true);
           }
 
-          // Fallback to NDEF if raw path not available
-          final ndefTag = ndef.Ndef.from(tag);
-          if (ndefTag != null) {
-            final msg = await ndefTag.read();
-            final payloads = msg?.records.map((r) => r.payload).toList() ?? [];
-            if (payloads.isEmpty) {
-              setState(() {
-                _nfcStatus = 'No NDEF message found.';
-                _scanning = false;
-              });
-              await nfc.NfcManager.instance.stopSession();
-              return;
+          final warnBytes = await _readNfcVAndroid(
+            vAndroid,
+            uid,
+            length: 4,
+            startBlock: MEM_VAL_WARNING_LEVEL ~/ 4,
+          );
+          final warnTag = _u32be(warnBytes);
+
+          final maxBytes = await _readNfcVAndroid(
+            vAndroid,
+            uid,
+            length: 4,
+            startBlock: MEM_VAL_MAX_LEVEL ~/ 4,
+          );
+          final maxTag = _u32be(maxBytes);
+
+          // Compare with app values
+          final diffs = <String>[];
+          if (mmTag != _measureMode) diffs.add('Measure Mode: sensor=$mmTag, app=$_measureMode');
+          if (nameTag != _userName) diffs.add('User Name: sensor="$nameTag", app="$_userName"');
+          if (warnTag != _warningLevel) diffs.add('Warning Level: sensor=$warnTag, app=$_warningLevel');
+          if (maxTag != _maxLevel) diffs.add('Max Level: sensor=$maxTag, app=$_maxLevel');
+
+          bool doUpdate = false;
+          if (diffs.isNotEmpty) {
+            doUpdate = await showDialog<bool>(
+                  context: context,
+                  builder: (_) => AlertDialog(
+                    title: const Text('Update sensor values?'),
+                    content: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Differences detected:'),
+                        const SizedBox(height: 8),
+                        ...diffs.map((d) => Text('• $d')),
+                      ],
+                    ),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('No')),
+                      ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Yes')),
+                    ],
+                  ),
+                ) ??
+                false;
+          }
+
+          if (doUpdate) {
+            // Perform writes (same as upload path)
+            final nameBytesApp = Uint8List.fromList(utf8.encode(_userName).take(30).toList());
+            final nameLenApp = nameBytesApp.length;
+
+            // Write measure mode
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_be32(_measureMode)),
+              startBlock: MEM_VAL_MEASURE_MODE ~/ 4,
+            );
+            // Write name length
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_be32(nameLenApp)),
+              startBlock: MEM_VAL_USER_NAME_LENGTH ~/ 4,
+            );
+            // Write name bytes
+            final paddedLenApp = ((nameLenApp + 3) ~/ 4) * 4;
+            final totalBlocks = paddedLenApp ~/ 4;
+            for (int i = 0; i < totalBlocks; i++) {
+              final base = i * 4;
+              final chunk = Uint8List.fromList([
+                base + 0 < nameLenApp ? nameBytesApp[base + 0] : 0x00,
+                base + 1 < nameLenApp ? nameBytesApp[base + 1] : 0x00,
+                base + 2 < nameLenApp ? nameBytesApp[base + 2] : 0x00,
+                base + 3 < nameLenApp ? nameBytesApp[base + 3] : 0x00,
+              ]);
+              await _writeNfcVAndroid(
+                vAndroid,
+                uid,
+                chunk,
+                startBlock: (MEM_VAL_USER_NAME ~/ 4) + i,
+              );
             }
-            final hexData = payloads.map((b) => b.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ')).join('\n');
-            setState(() {
-              _eepromData = hexData;
-              _nfcStatus = 'NDEF data read (fallback).';
-              _scanning = false;
-            });
-            await nfc.NfcManager.instance.stopSession();
-            return;
+            // Write warning and max levels
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_be32(_warningLevel)),
+              startBlock: MEM_VAL_WARNING_LEVEL ~/ 4,
+            );
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_be32(_maxLevel)),
+              startBlock: MEM_VAL_MAX_LEVEL ~/ 4,
+            );
           }
 
-          throw Exception('Tag does not support ISO15693/NfcV or NDEF read.');
+          // 2) Read last_write_guess and scan for magic 0xC1EAC1EA
+          const int magic = 0xC1EAC1EA;
+          final guessBytes = await _readNfcVAndroid(
+            vAndroid,
+            uid,
+            length: 4,
+            startBlock: MEM_PTR_LAST_WRITE ~/ 4,
+          );
+          int guess = _u32be(guessBytes);
+          if (guess < 0) guess = 0;
+          // Cap iterations to avoid long loops; adjust as needed
+          const int maxIters = 1024;
+          int? foundAddress;
+          for (int i = 0; i < maxIters; i++) {
+            final addr = guess + 4 * i;
+            final valBytes = await _readNfcVAndroid(
+              vAndroid,
+              uid,
+              length: 4,
+              startBlock: addr ~/ 4,
+            );
+            final val = _u32be(valBytes);
+            if (val == magic) {
+              foundAddress = addr;
+              break;
+            }
+          }
+
+          setState(() {
+            _lastWriteAddress = foundAddress;
+            _nfcStatus = foundAddress != null
+                ? 'Connected. Last write marker at byte $foundAddress.'
+                : 'Connected. Last write marker not found.';
+            _scanning = false;
+          });
+          await nfc.NfcManager.instance.stopSession();
         } catch (e) {
           setState(() {
-            _nfcStatus = 'Error reading tag: $e';
+            _nfcStatus = 'Error connecting: $e';
             _scanning = false;
           });
           await nfc.NfcManager.instance.stopSession(errorMessageIos: e.toString());
         }
       },
-      pollingOptions: {nfc.NfcPollingOption.iso15693},
     );
   }
+
+  // _startNfcScan removed; merged into _connectToSensor
 
   // Persist user config locally
   Future<void> _saveConfigToStorage() async {
@@ -287,145 +423,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // _buildConfigBytes removed; using explicit memory-map writes instead.
 
-  Future<void> _uploadConfigToNfc() async {
-    setState(() {
-      _nfcStatus = 'Ready to upload config. Touch the ST25DV tag to the phone.';
-      _scanning = true;
-    });
-  bool isAvailable = await nfc.NfcManager.instance.isAvailable();
-    if (!isAvailable) {
-      setState(() {
-        _nfcStatus = 'NFC is not available on this device.';
-        _scanning = false;
-      });
-      return;
-    }
-    nfc.NfcManager.instance.startSession(
-      onDiscovered: (nfc.NfcTag tag) async {
-        try {
-          // Write per memory map using raw ISO15693
-          // Prepare values
-          final nameBytes = Uint8List.fromList(utf8.encode(_userName).take(30).toList());
-          final nameLen = nameBytes.length;
-          List<int> _be32(int v) => [
-                (v >> 24) & 0xFF,
-                (v >> 16) & 0xFF,
-                (v >> 8) & 0xFF,
-                v & 0xFF,
-              ];
-
-          // Prefer platform ISO15693/NfcV access to avoid NDEF overhead
-          // final ios15693 = ios.Iso15693Ios.from(tag);
-          // if (ios15693 != null) {
-          //   await _writeIso15693Ios(ios15693, data, startBlock: 0, blockSize: 4);
-          //   setState(() {
-          //     _nfcStatus = 'Config written (ISO15693 iOS raw).';
-          //     _scanning = false;
-          //   });
-          //   await nfc.NfcManager.instance.stopSession();
-          //   return;
-          // }
-
-          final vAndroid = android.NfcVAndroid.from(tag);
-          if (vAndroid != null) {
-            final uid = vAndroid.tag.id; // 8-byte UID
-            // Write MEASURE_MODE (4 bytes) at offset 16 (block 4)
-            await _writeNfcVAndroid(
-              vAndroid,
-              uid,
-              Uint8List.fromList(_be32(_measureMode)),
-              startBlock: MEM_VAL_MEASURE_MODE ~/ 4,
-              blockSize: 4,
-            );
-            // Write USER_NAME_LENGTH (4 bytes) at offset 44 (block 11)
-            await _writeNfcVAndroid(
-              vAndroid,
-              uid,
-              Uint8List.fromList(_be32(nameLen)),
-              startBlock: MEM_VAL_USER_NAME_LENGTH ~/ 4,
-              blockSize: 4,
-            );
-            // Write USER_NAME bytes starting at offset 48 (block 12)
-            final paddedLen = ((nameLen + 3) ~/ 4) * 4; // multiple of 4
-            final totalBlocks = paddedLen ~/ 4;
-            for (int i = 0; i < totalBlocks; i++) {
-              final base = i * 4;
-              final chunk = Uint8List.fromList([
-                base + 0 < nameLen ? nameBytes[base + 0] : 0x00,
-                base + 1 < nameLen ? nameBytes[base + 1] : 0x00,
-                base + 2 < nameLen ? nameBytes[base + 2] : 0x00,
-                base + 3 < nameLen ? nameBytes[base + 3] : 0x00,
-              ]);
-              await _writeNfcVAndroid(
-                vAndroid,
-                uid,
-                chunk,
-                startBlock: (MEM_VAL_USER_NAME ~/ 4) + i,
-                blockSize: 4,
-              );
-            }
-            // Write WARNING_LEVEL (4 bytes) at offset 80 (block 20)
-            await _writeNfcVAndroid(
-              vAndroid,
-              uid,
-              Uint8List.fromList(_be32(_warningLevel)),
-              startBlock: MEM_VAL_WARNING_LEVEL ~/ 4,
-              blockSize: 4,
-            );
-            // Write MAX_LEVEL (4 bytes) at offset 84 (block 21)
-            await _writeNfcVAndroid(
-              vAndroid,
-              uid,
-              Uint8List.fromList(_be32(_maxLevel)),
-              startBlock: MEM_VAL_MAX_LEVEL ~/ 4,
-              blockSize: 4,
-            );
-            setState(() {
-              _nfcStatus = 'Config written (NFC-V Android raw, memory map).';
-              _scanning = false;
-            });
-            await nfc.NfcManager.instance.stopSession();
-            return;
-          }
-
-          // Fallback: NDEF (if nothing else available)
-          final ndefTag = ndef.Ndef.from(tag);
-          if (ndefTag != null && ndefTag.isWritable) {
-            final payload = Uint8List.fromList([
-              ..._be32(_measureMode),
-              ..._be32(nameLen),
-              ...nameBytes,
-              ..._be32(_warningLevel),
-              ..._be32(_maxLevel),
-            ]);
-            final record = ndefrec.NdefRecord(
-              typeNameFormat: ndefrec.TypeNameFormat.media,
-              type: Uint8List.fromList(ascii.encode('application/octet-stream')),
-              identifier: Uint8List(0),
-              payload: payload,
-            );
-            final message = ndefrec.NdefMessage(records: [record]);
-            await ndefTag.write(message: message);
-            setState(() {
-              _nfcStatus = 'Config written via NDEF (fallback).';
-              _scanning = false;
-            });
-            await nfc.NfcManager.instance.stopSession();
-            return;
-          }
-
-          throw Exception('Tag does not support ISO15693/NfcV or NDEF write.');
-        } catch (e) {
-          setState(() {
-            _nfcStatus = 'Error uploading config: $e';
-            _scanning = false;
-          });
-          await nfc.NfcManager.instance.stopSession(errorMessageIos: e.toString());
-        }
-      },
-      pollingOptions: {nfc.NfcPollingOption.iso15693},
-    );
-  }
+  // _uploadConfigToNfc removed; merged into _connectToSensor
 
   // Write raw bytes to ISO15693 tag on iOS in consecutive 4-byte blocks starting at startBlock.
   // Future<void> _writeIso15693Ios(
@@ -566,7 +564,7 @@ class _MyHomePageState extends State<MyHomePage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Show config summary if set
-            if (_userName.isNotEmpty || _warningLevel > 0 || _maxLevel > 0)
+            if (_userName.isNotEmpty || _warningLevel > 0 || _maxLevel > 0 || _lastWriteAddress != null)
               Column(
                 children: [
                   if (_userName.isNotEmpty) Text('User Name: $_userName', textAlign: TextAlign.center),
@@ -576,6 +574,8 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   Text('Warning Level: $_warningLevel ug/m³', textAlign: TextAlign.center),
                   Text('Max Level: $_maxLevel ug/m³', textAlign: TextAlign.center),
+                  if (_lastWriteAddress != null)
+                    Text('Last Write Address: $_lastWriteAddress', textAlign: TextAlign.center),
                   const SizedBox(height: 24),
                 ],
               ),
@@ -590,15 +590,9 @@ class _MyHomePageState extends State<MyHomePage> {
               const SizedBox(height: 24),
             ],
             ElevatedButton.icon(
-              onPressed: _scanning ? null : _startNfcScan,
-              icon: const Icon(Icons.nfc),
-              label: const Text('Start NFC Scan'),
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton.icon(
-              onPressed: _scanning ? null : _uploadConfigToNfc,
-              icon: const Icon(Icons.upload),
-              label: const Text('Upload Config to NFC'),
+              onPressed: _scanning ? null : _connectToSensor,
+              icon: const Icon(Icons.sync),
+              label: const Text('Connect to sensor'),
             ),
           ],
         ),
