@@ -65,11 +65,14 @@ class _MyHomePageState extends State<MyHomePage> {
   String _nfcStatus = 'Tap "Start NFC Scan" and touch the ST25DV tag.';
   String? _eepromData;
   bool _scanning = false;
+  // Memory map (byte offsets)
+  static const int MEM_VAL_MEASURE_MODE = 16; // 4 bytes (block 4)
+  static const int MEM_VAL_USER_NAME_LENGTH = 44; // 4 bytes (block 11)
+  static const int MEM_VAL_USER_NAME = 48; // 30 bytes (blocks 12..19)
 
   // Config fields
   String _userName = '';
-  String _userCompany = '';
-  String _sensorSetting = 'low';
+  int _measureMode = 0; // 0 or 1
 
   @override
   void initState() {
@@ -77,60 +80,48 @@ class _MyHomePageState extends State<MyHomePage> {
     _loadConfigFromStorage();
   }
 
-  Future<void> _showConfigDialog() async {
+  // Simple settings dialog for measure mode and user name
+  Future<void> _openSettings() async {
     final nameController = TextEditingController(text: _userName);
-    final companyController = TextEditingController(text: _userCompany);
-    String dropdownValue = _sensorSetting;
-
+    int tempMode = _measureMode;
     await showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: const Text('Configuration'),
+          title: const Text('Settings'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(
                 controller: nameController,
-                decoration: const InputDecoration(labelText: 'User Name'),
+                maxLength: 30,
+                decoration: const InputDecoration(labelText: 'User Name (max 30)'),
               ),
-              TextField(
-                controller: companyController,
-                decoration: const InputDecoration(labelText: 'User Company'),
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                value: dropdownValue,
-                decoration: const InputDecoration(labelText: 'Sensor Setting'),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<int>(
+                value: tempMode,
+                decoration: const InputDecoration(labelText: 'Measure Mode'),
                 items: const [
-                  DropdownMenuItem(value: 'low', child: Text('Low')),
-                  DropdownMenuItem(value: 'medium', child: Text('Medium')),
-                  DropdownMenuItem(value: 'high', child: Text('High')),
+                  DropdownMenuItem(value: 0, child: Text('0')),
+                  DropdownMenuItem(value: 1, child: Text('1')),
                 ],
-                onChanged: (value) {
-                  if (value != null) {
-                    dropdownValue = value;
-                  }
-                },
+                onChanged: (v) => tempMode = v ?? 0,
               ),
             ],
           ),
           actions: [
             TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
+              onPressed: () => Navigator.pop(context),
               child: const Text('Cancel'),
             ),
             ElevatedButton(
-              onPressed: () {
+              onPressed: () async {
                 setState(() {
-                  _userName = nameController.text;
-                  _userCompany = companyController.text;
-                  _sensorSetting = dropdownValue;
+                  _userName = nameController.text.trim();
+                  _measureMode = tempMode;
                 });
-                _saveConfigToStorage();
-                Navigator.of(context).pop();
+                await _saveConfigToStorage();
+                if (context.mounted) Navigator.pop(context);
               },
               child: const Text('Save'),
             ),
@@ -140,13 +131,15 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+  // _showConfigDialog removed; use _openSettings instead.
+
   Future<void> _startNfcScan() async {
     setState(() {
       _nfcStatus = 'Scanning... Touch the ST25DV tag to the phone.';
       _eepromData = null;
       _scanning = true;
     });
-  bool isAvailable = await nfc.NfcManager.instance.isAvailable();
+    bool isAvailable = await nfc.NfcManager.instance.isAvailable();
     if (!isAvailable) {
       setState(() {
         _nfcStatus = 'NFC is not available on this device.';
@@ -163,18 +156,7 @@ class _MyHomePageState extends State<MyHomePage> {
           const int startBlock = 0;
           const int blockSize = 4;
 
-          // final ios15693 = ios.Iso15693Ios.from(tag);
-          // if (ios15693 != null) {
-          //   final data = await _readIso15693Ios(ios15693, length: length, startBlock: startBlock, blockSize: blockSize);
-          //   final hex = data.map((e) => e.toRadixString(16).padLeft(2, '0')).join(' ');
-          //   setState(() {
-          //     _eepromData = hex;
-          //     _nfcStatus = 'EEPROM data read (ISO15693 iOS raw).';
-          //     _scanning = false;
-          //   });
-          //   await nfc.NfcManager.instance.stopSession();
-          //   return;
-          // }
+      // iOS raw path can be added here if required
 
           final vAndroid = android.NfcVAndroid.from(tag);
           if (vAndroid != null) {
@@ -230,54 +212,18 @@ class _MyHomePageState extends State<MyHomePage> {
   Future<void> _saveConfigToStorage() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('userName', _userName);
-    await prefs.setString('userCompany', _userCompany);
-    await prefs.setString('sensorSetting', _sensorSetting);
+    await prefs.setInt('measureMode', _measureMode);
   }
 
   Future<void> _loadConfigFromStorage() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _userName = prefs.getString('userName') ?? _userName;
-      _userCompany = prefs.getString('userCompany') ?? _userCompany;
-      _sensorSetting = prefs.getString('sensorSetting') ?? _sensorSetting;
+      _userName = prefs.getString('userName') ?? '';
+      _measureMode = prefs.getInt('measureMode') ?? 0;
     });
   }
 
-  // Helper to encode config as bytes for EEPROM
-  List<int> _buildConfigBytes() {
-    // First 4 bytes: Unix timestamp (seconds since epoch), big-endian
-    final int ts = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final List<int> timestampBytes = [
-      (ts >> 24) & 0xFF,
-      (ts >> 16) & 0xFF,
-      (ts >> 8) & 0xFF,
-      ts & 0xFF,
-    ];
-
-    List<int> nameBytes = List.filled(50, 0);
-    List<int> companyBytes = List.filled(50, 0);
-    List<int> userNameBytes = _userName.codeUnits;
-    List<int> userCompanyBytes = _userCompany.codeUnits;
-    for (int i = 0; i < userNameBytes.length && i < 50; i++) {
-      nameBytes[i] = userNameBytes[i];
-    }
-    for (int i = 0; i < userCompanyBytes.length && i < 50; i++) {
-      companyBytes[i] = userCompanyBytes[i];
-    }
-    int sensorSettingByte = 0;
-    switch (_sensorSetting) {
-      case 'low':
-        sensorSettingByte = 0;
-        break;
-      case 'medium':
-        sensorSettingByte = 1;
-        break;
-      case 'high':
-        sensorSettingByte = 2;
-        break;
-    }
-    return [...timestampBytes, ...nameBytes, ...companyBytes, sensorSettingByte];
-  }
+  // _buildConfigBytes removed; using explicit memory-map writes instead.
 
   Future<void> _uploadConfigToNfc() async {
     setState(() {
@@ -295,8 +241,16 @@ class _MyHomePageState extends State<MyHomePage> {
     nfc.NfcManager.instance.startSession(
       onDiscovered: (nfc.NfcTag tag) async {
         try {
-          // Build raw config bytes to write directly to EEPROM
-          final data = Uint8List.fromList(_buildConfigBytes());
+          // Write per memory map using raw ISO15693
+          // Prepare values
+          final nameBytes = Uint8List.fromList(utf8.encode(_userName).take(30).toList());
+          final nameLen = nameBytes.length;
+          List<int> _be32(int v) => [
+                (v >> 24) & 0xFF,
+                (v >> 16) & 0xFF,
+                (v >> 8) & 0xFF,
+                v & 0xFF,
+              ];
 
           // Prefer platform ISO15693/NfcV access to avoid NDEF overhead
           // final ios15693 = ios.Iso15693Ios.from(tag);
@@ -313,9 +267,43 @@ class _MyHomePageState extends State<MyHomePage> {
           final vAndroid = android.NfcVAndroid.from(tag);
           if (vAndroid != null) {
             final uid = vAndroid.tag.id; // 8-byte UID
-            await _writeNfcVAndroid(vAndroid, uid, data, startBlock: 0, blockSize: 4);
+            // Write MEASURE_MODE (4 bytes) at offset 16 (block 4)
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_be32(_measureMode)),
+              startBlock: MEM_VAL_MEASURE_MODE ~/ 4,
+              blockSize: 4,
+            );
+            // Write USER_NAME_LENGTH (4 bytes) at offset 44 (block 11)
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_be32(nameLen)),
+              startBlock: MEM_VAL_USER_NAME_LENGTH ~/ 4,
+              blockSize: 4,
+            );
+            // Write USER_NAME bytes starting at offset 48 (block 12)
+            final paddedLen = ((nameLen + 3) ~/ 4) * 4; // multiple of 4
+            final totalBlocks = paddedLen ~/ 4;
+            for (int i = 0; i < totalBlocks; i++) {
+              final base = i * 4;
+              final chunk = Uint8List.fromList([
+                base + 0 < nameLen ? nameBytes[base + 0] : 0x00,
+                base + 1 < nameLen ? nameBytes[base + 1] : 0x00,
+                base + 2 < nameLen ? nameBytes[base + 2] : 0x00,
+                base + 3 < nameLen ? nameBytes[base + 3] : 0x00,
+              ]);
+              await _writeNfcVAndroid(
+                vAndroid,
+                uid,
+                chunk,
+                startBlock: (MEM_VAL_USER_NAME ~/ 4) + i,
+                blockSize: 4,
+              );
+            }
             setState(() {
-              _nfcStatus = 'Config written (NFC-V Android raw).';
+              _nfcStatus = 'Config written (NFC-V Android raw, memory map).';
               _scanning = false;
             });
             await nfc.NfcManager.instance.stopSession();
@@ -325,11 +313,16 @@ class _MyHomePageState extends State<MyHomePage> {
           // Fallback: NDEF (if nothing else available)
           final ndefTag = ndef.Ndef.from(tag);
           if (ndefTag != null && ndefTag.isWritable) {
+            final payload = Uint8List.fromList([
+              ..._be32(_measureMode),
+              ..._be32(nameLen),
+              ...nameBytes,
+            ]);
             final record = ndefrec.NdefRecord(
               typeNameFormat: ndefrec.TypeNameFormat.media,
               type: Uint8List.fromList(ascii.encode('application/octet-stream')),
               identifier: Uint8List(0),
-              payload: data,
+              payload: payload,
             );
             final message = ndefrec.NdefMessage(records: [record]);
             await ndefTag.write(message: message);
@@ -482,7 +475,7 @@ class _MyHomePageState extends State<MyHomePage> {
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Config',
-            onPressed: _showConfigDialog,
+            onPressed: _openSettings,
           ),
         ],
       ),
@@ -493,14 +486,12 @@ class _MyHomePageState extends State<MyHomePage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Show config summary if set
-            if (_userName.isNotEmpty || _userCompany.isNotEmpty)
+            if (_userName.isNotEmpty)
               Column(
                 children: [
                   if (_userName.isNotEmpty)
                     Text('User Name: $_userName', textAlign: TextAlign.center),
-                  if (_userCompany.isNotEmpty)
-                    Text('User Company: $_userCompany', textAlign: TextAlign.center),
-                  Text('Sensor Setting: ${_sensorSetting[0].toUpperCase()}${_sensorSetting.substring(1)}', textAlign: TextAlign.center),
+                  Text('Measure Mode: $_measureMode', textAlign: TextAlign.center),
                   const SizedBox(height: 24),
                 ],
               ),
