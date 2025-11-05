@@ -65,6 +65,8 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _scanning = false;
   String? _progressDetail; // shows current read/write step
   // Memory map (byte offsets)
+  static const int MEM_VAL_TIMESTAMP = 4; // 4 bytes (block 4)
+
   static const int MEM_VAL_MEASURE_MODE = 16; // 4 bytes (block 4)
   static const int MEM_VAL_USER_NAME_LENGTH = 44; // 4 bytes (block 11)
   static const int MEM_VAL_USER_NAME = 48; // 30 bytes (blocks 12..19)
@@ -232,6 +234,18 @@ class _MyHomePageState extends State<MyHomePage> {
             throw Exception('ISO15693 (NFC-V) not available; cannot read raw memory.');
           }
           final uid = vAndroid.tag.id;
+
+          // Write current UNIX time (seconds, force LSB=1) to MEM_VAL_TIMESTAMP on connect
+          final int nowSec = (DateTime.now().millisecondsSinceEpoch ~/ 1000) | 1;
+          setState(() {
+            _progressDetail = 'Writing timestamp @ 0x${MEM_VAL_TIMESTAMP.toRadixString(16)} = $nowSec';
+          });
+          await _writeNfcVAndroid(
+            vAndroid,
+            uid,
+            Uint8List.fromList(_le32(nowSec)),
+            startBlock: MEM_VAL_TIMESTAMP ~/ 4,
+          );
 
           // 1) Read current values from sensor
           setState(() { _progressDetail = 'Reading measure mode @ 0x${MEM_VAL_MEASURE_MODE.toRadixString(16)}'; });
@@ -405,6 +419,27 @@ class _MyHomePageState extends State<MyHomePage> {
             }
           }
 
+          // If marker found, write timestamp to that address and rewrite magic at address+4
+          if (foundAddress != null) {
+            final int markerAddr = foundAddress;
+            final int tsOdd = (DateTime.now().millisecondsSinceEpoch ~/ 1000) | 1;
+            setState(() { _progressDetail = 'Writing scan timestamp @ 0x${markerAddr.toRadixString(16)} = $tsOdd'; });
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_le32(tsOdd)),
+              startBlock: markerAddr ~/ 4,
+            );
+            final int nextAddr = markerAddr + 4;
+            setState(() { _progressDetail = 'Advancing marker @ 0x${nextAddr.toRadixString(16)}'; });
+            await _writeNfcVAndroid(
+              vAndroid,
+              uid,
+              Uint8List.fromList(_le32(magic)),
+              startBlock: nextAddr ~/ 4,
+            );
+          }
+
           setState(() {
             _lastWriteAddress = foundAddress;
             _nfcStatus = foundAddress != null
@@ -501,6 +536,7 @@ class _MyHomePageState extends State<MyHomePage> {
     // ISO15693 Flags: addressed (0x20) + high data rate (0x02)
     const int flags = 0x22;
     const int cmdWriteSingleBlock = 0x21; // ISO15693 Write Single Block
+    const int cmdWriteSingleBlockExt = 0x31; // ISO15693 Extended Write Single Block (16-bit block number)
 
     final totalBlocks = (data.length + blockSize - 1) ~/ blockSize;
     for (int i = 0; i < totalBlocks; i++) {
@@ -513,15 +549,22 @@ class _MyHomePageState extends State<MyHomePage> {
 
       // Frame: FLAGS | CMD | UID(8) | BLOCK# | DATA(blockSize)
       final frame = BytesBuilder();
-      frame.add([flags, cmdWriteSingleBlock]);
-      frame.add(uid); // Many devices accept id as-is; adjust endianness if required by your tag
-      frame.add([startBlock + i]);
+      final int blockNumber = startBlock + i;
+      final bool extended = blockNumber > 0xFF;
+      frame.add([flags, extended ? cmdWriteSingleBlockExt : cmdWriteSingleBlock]);
+      frame.add(uid); // UID as provided by Android API works for addressed mode on most devices
+      if (extended) {
+        // 16-bit block number, LSB first
+        frame.add([blockNumber & 0xFF, (blockNumber >> 8) & 0xFF]);
+      } else {
+        frame.add([blockNumber & 0xFF]);
+      }
       frame.add(block);
 
       final response = await v.transceive(frame.toBytes());
       // Optional: check response[0] == 0x00 (success) per ISO15693 response format
       if (response.isEmpty || response[0] != 0x00) {
-        throw Exception('Write block ${startBlock + i} failed (resp: ${response.map((b)=>b.toRadixString(16).padLeft(2,'0')).join(' ')})');
+        throw Exception('Write block ${blockNumber} failed (resp: ${response.map((b)=>b.toRadixString(16).padLeft(2,'0')).join(' ')})');
       }
     }
   }
@@ -563,16 +606,24 @@ class _MyHomePageState extends State<MyHomePage> {
     // Flags: addressed + high data rate
     const int flags = 0x22;
     const int cmdReadSingleBlock = 0x20; // ISO15693 Read Single Block
+    const int cmdReadSingleBlockExt = 0x30; // ISO15693 Extended Read Single Block (16-bit block number)
     final blocksToRead = (length + blockSize - 1) ~/ blockSize;
     final out = BytesBuilder();
     for (int i = 0; i < blocksToRead; i++) {
       final frame = BytesBuilder();
-      frame.add([flags, cmdReadSingleBlock]);
+      final int blockNumber = startBlock + i;
+      final bool extended = blockNumber > 0xFF;
+      frame.add([flags, extended ? cmdReadSingleBlockExt : cmdReadSingleBlock]);
       frame.add(uid);
-      frame.add([startBlock + i]);
+      if (extended) {
+        // 16-bit block number, LSB first
+        frame.add([blockNumber & 0xFF, (blockNumber >> 8) & 0xFF]);
+      } else {
+        frame.add([blockNumber & 0xFF]);
+      }
       final resp = await v.transceive(frame.toBytes());
       if (resp.isEmpty || resp[0] != 0x00) {
-        throw Exception('Read block ${startBlock + i} failed (resp: ${resp.map((b)=>b.toRadixString(16).padLeft(2,'0')).join(' ')})');
+        throw Exception('Read block ${blockNumber} failed (resp: ${resp.map((b)=>b.toRadixString(16).padLeft(2,'0')).join(' ')})');
       }
       // Skip status byte (0x00) and append block data
       out.add(resp.sublist(1));
