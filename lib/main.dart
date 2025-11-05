@@ -66,6 +66,9 @@ class _MyHomePageState extends State<MyHomePage> {
   String? _progressDetail; // shows current read/write step
   // Memory map (byte offsets)
   static const int MEM_VAL_TIMESTAMP = 4; // 4 bytes (block 4)
+  static const int MEM_VAL_NEWTIMESTAMP = 28; // 4 bytes (block 7)
+  // static const int MEM_PTR_TIMESTAMP = 0; // not used at the moment
+
 
   static const int MEM_VAL_MEASURE_MODE = 16; // 4 bytes (block 4)
   static const int MEM_VAL_USER_NAME_LENGTH = 44; // 4 bytes (block 11)
@@ -73,6 +76,9 @@ class _MyHomePageState extends State<MyHomePage> {
   static const int MEM_VAL_WARNING_LEVEL = 80; // 4 bytes (block 20)
   static const int MEM_VAL_MAX_LEVEL = 84; // 4 bytes (block 21)
   static const int MEM_PTR_LAST_WRITE = 8; // 4 bytes (block 2)
+  static const int MEM_VAL_DATA_START = 200; 
+  static const int MEM_VAL_DATA_END = 8188; 
+
 
   // Config fields
   String _userName = '';
@@ -250,6 +256,21 @@ class _MyHomePageState extends State<MyHomePage> {
           );
           await _setLastTimestampWriteMs(nowMs);
 
+          // Write fixed value 0x0000501D to MEM_VAL_NEWTIMESTAMP (little-endian)
+          setState(() {
+            _progressDetail = 'Writing NEWTIMESTAMP @ 0x${MEM_VAL_NEWTIMESTAMP.toRadixString(16)} = 0x0000501D';
+          });
+          await _writeNfcVAndroid(
+            vAndroid,
+            uid,
+            Uint8List.fromList(_le32(20509)), //0x501D
+            startBlock: MEM_VAL_NEWTIMESTAMP ~/ 4,
+          );
+
+          
+
+
+
           // 1) Read current values from sensor
           setState(() { _progressDetail = 'Reading measure mode @ 0x${MEM_VAL_MEASURE_MODE.toRadixString(16)}'; });
           final mmBytes = await _readNfcVAndroid(
@@ -390,7 +411,7 @@ class _MyHomePageState extends State<MyHomePage> {
             );
           }
 
-          // 2) Read last_write_guess and scan for magic 0xC1EAC1EA
+          // 2) Read last_write_guess and scan for magic 0xC1EAC1EA in ring buffer region
           const int magic = 0xC1EAC1EA;
           setState(() { _progressDetail = 'Reading last_write_guess @ 0x${MEM_PTR_LAST_WRITE.toRadixString(16)}'; });
           final guessBytes = await _readNfcVAndroid(
@@ -400,12 +421,16 @@ class _MyHomePageState extends State<MyHomePage> {
             startBlock: MEM_PTR_LAST_WRITE ~/ 4,
           );
           int guess = _u32le(guessBytes);
-          if (guess < 0) guess = 0;
-          // Cap iterations to avoid long loops; adjust as needed
-          const int maxIters = 1024;
+          // Clamp guess into ring region and align to 4
+          if (guess < MEM_VAL_DATA_START) guess = MEM_VAL_DATA_START;
+          if (guess > MEM_VAL_DATA_END) guess = MEM_VAL_DATA_START;
+          guess = (guess ~/ 4) * 4;
+          // Iterate over the ring once max
+          final int ringSpan = MEM_VAL_DATA_END - MEM_VAL_DATA_START + 4; // inclusive end, 4-byte step
+          final int maxIters = (ringSpan ~/ 4);
           int? foundAddress;
+          int addr = guess;
           for (int i = 0; i < maxIters; i++) {
-            final addr = guess + 4 * i;
             setState(() { _progressDetail = 'Scanning marker @ ${addr}'; });
             final valBytes = await _readNfcVAndroid(
               vAndroid,
@@ -420,29 +445,14 @@ class _MyHomePageState extends State<MyHomePage> {
               foundAddress = addr;
               break;
             }
+            // advance with wrap in ring
+            addr += 4;
+            if (addr > MEM_VAL_DATA_END) addr = MEM_VAL_DATA_START;
           }
 
           // If marker found, write timestamp to that address and rewrite magic at address+4
           if (foundAddress != null) {
-            final int markerAddr = foundAddress;
-            final int nowMs2 = DateTime.now().millisecondsSinceEpoch;
-            final int tsOdd = (nowMs2 ~/ 1000) | 1;
-            setState(() { _progressDetail = 'Writing scan timestamp @ 0x${markerAddr.toRadixString(16)} = $tsOdd'; });
-            await _writeNfcVAndroid(
-              vAndroid,
-              uid,
-              Uint8List.fromList(_le32(tsOdd)),
-              startBlock: markerAddr ~/ 4,
-            );
-            await _setLastTimestampWriteMs(nowMs2);
-            final int nextAddr = markerAddr + 4;
-            setState(() { _progressDetail = 'Advancing marker @ 0x${nextAddr.toRadixString(16)}'; });
-            await _writeNfcVAndroid(
-              vAndroid,
-              uid,
-              Uint8List.fromList(_le32(magic)),
-              startBlock: nextAddr ~/ 4,
-            );
+
           }
 
           setState(() {
