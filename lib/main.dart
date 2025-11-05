@@ -80,15 +80,18 @@ class _MyHomePageState extends State<MyHomePage> {
   int? _lastWriteAddress; // discovered address of magic marker
   Timer? _disconnectTimer; // grace timer to re-enable connect after disconnect
 
-  // Big-endian helpers
-  List<int> _be32(int v) => [
-        (v >> 24) & 0xFF,
-        (v >> 16) & 0xFF,
-        (v >> 8) & 0xFF,
+  // Little-endian helpers (EEPROM stores values little-endian)
+  List<int> _le32(int v) => [
         v & 0xFF,
+        (v >> 8) & 0xFF,
+        (v >> 16) & 0xFF,
+        (v >> 24) & 0xFF,
       ];
-  int _u32be(Uint8List b, [int off = 0]) =>
-      (b[off] << 24) | (b[off + 1] << 16) | (b[off + 2] << 8) | b[off + 3];
+  int _u32le(Uint8List b, [int off = 0]) =>
+      (b[off] & 0xFF) |
+      ((b[off + 1] & 0xFF) << 8) |
+      ((b[off + 2] & 0xFF) << 16) |
+      ((b[off + 3] & 0xFF) << 24);
 
   @override
   void initState() {
@@ -238,7 +241,7 @@ class _MyHomePageState extends State<MyHomePage> {
             length: 4,
             startBlock: MEM_VAL_MEASURE_MODE ~/ 4,
           );
-          final mmTag = _u32be(mmBytes);
+          final mmTag = _u32le(mmBytes);
 
           setState(() { _progressDetail = 'Reading name length @ 0x${MEM_VAL_USER_NAME_LENGTH.toRadixString(16)}'; });
           final nameLenBytes = await _readNfcVAndroid(
@@ -247,7 +250,7 @@ class _MyHomePageState extends State<MyHomePage> {
             length: 4,
             startBlock: MEM_VAL_USER_NAME_LENGTH ~/ 4,
           );
-          int nameLenTag = _u32be(nameLenBytes);
+          int nameLenTag = _u32le(nameLenBytes);
           if (nameLenTag < 0) nameLenTag = 0;
           if (nameLenTag > 30) nameLenTag = 30;
           final paddedNameLen = ((nameLenTag + 3) ~/ 4) * 4;
@@ -270,7 +273,7 @@ class _MyHomePageState extends State<MyHomePage> {
             length: 4,
             startBlock: MEM_VAL_WARNING_LEVEL ~/ 4,
           );
-          final warnTag = _u32be(warnBytes);
+          final warnTag = _u32le(warnBytes);
 
           setState(() { _progressDetail = 'Reading max level @ 0x${MEM_VAL_MAX_LEVEL.toRadixString(16)}'; });
           final maxBytes = await _readNfcVAndroid(
@@ -279,7 +282,7 @@ class _MyHomePageState extends State<MyHomePage> {
             length: 4,
             startBlock: MEM_VAL_MAX_LEVEL ~/ 4,
           );
-          final maxTag = _u32be(maxBytes);
+          final maxTag = _u32le(maxBytes);
 
           // Compare with app values
           final diffs = <String>[];
@@ -322,7 +325,7 @@ class _MyHomePageState extends State<MyHomePage> {
             await _writeNfcVAndroid(
               vAndroid,
               uid,
-              Uint8List.fromList(_be32(_measureMode)),
+              Uint8List.fromList(_le32(_measureMode)),
               startBlock: MEM_VAL_MEASURE_MODE ~/ 4,
             );
             // Write name length
@@ -330,7 +333,7 @@ class _MyHomePageState extends State<MyHomePage> {
             await _writeNfcVAndroid(
               vAndroid,
               uid,
-              Uint8List.fromList(_be32(nameLenApp)),
+              Uint8List.fromList(_le32(nameLenApp)),
               startBlock: MEM_VAL_USER_NAME_LENGTH ~/ 4,
             );
             // Write name bytes
@@ -358,14 +361,14 @@ class _MyHomePageState extends State<MyHomePage> {
             await _writeNfcVAndroid(
               vAndroid,
               uid,
-              Uint8List.fromList(_be32(_warningLevel)),
+              Uint8List.fromList(_le32(_warningLevel)),
               startBlock: MEM_VAL_WARNING_LEVEL ~/ 4,
             );
             setState(() { _progressDetail = 'Writing max level @ 0x${MEM_VAL_MAX_LEVEL.toRadixString(16)}'; });
             await _writeNfcVAndroid(
               vAndroid,
               uid,
-              Uint8List.fromList(_be32(_maxLevel)),
+              Uint8List.fromList(_le32(_maxLevel)),
               startBlock: MEM_VAL_MAX_LEVEL ~/ 4,
             );
           }
@@ -379,21 +382,23 @@ class _MyHomePageState extends State<MyHomePage> {
             length: 4,
             startBlock: MEM_PTR_LAST_WRITE ~/ 4,
           );
-          int guess = _u32be(guessBytes);
+          int guess = _u32le(guessBytes);
           if (guess < 0) guess = 0;
           // Cap iterations to avoid long loops; adjust as needed
           const int maxIters = 1024;
           int? foundAddress;
           for (int i = 0; i < maxIters; i++) {
             final addr = guess + 4 * i;
-            setState(() { _progressDetail = 'Scanning marker @ ${warnTag}'; });
+            setState(() { _progressDetail = 'Scanning marker @ ${addr}'; });
             final valBytes = await _readNfcVAndroid(
               vAndroid,
               uid,
               length: 4,
               startBlock: addr ~/ 4,
             );
-            final val = _u32be(valBytes);
+            final val = _u32le(valBytes);
+            // Verbose terminal logging for scan loop: address and decoded value (hex)
+            print("[NFC] scan addr=0x${addr.toRadixString(16)} val=0x${val.toRadixString(16).padLeft(8, '0')}");
             if (val == magic) {
               foundAddress = addr;
               break;
