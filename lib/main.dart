@@ -81,6 +81,7 @@ class _MyHomePageState extends State<MyHomePage> {
   int _maxLevel = 0; // ug/m3
   int? _lastWriteAddress; // discovered address of magic marker
   Timer? _disconnectTimer; // grace timer to re-enable connect after disconnect
+  int? _lastTimestampWriteMs; // last time app wrote a timestamp to the device
 
   // Little-endian helpers (EEPROM stores values little-endian)
   List<int> _le32(int v) => [
@@ -236,7 +237,8 @@ class _MyHomePageState extends State<MyHomePage> {
           final uid = vAndroid.tag.id;
 
           // Write current UNIX time (seconds, force LSB=1) to MEM_VAL_TIMESTAMP on connect
-          final int nowSec = (DateTime.now().millisecondsSinceEpoch ~/ 1000) | 1;
+          final int nowMs = DateTime.now().millisecondsSinceEpoch;
+          final int nowSec = (nowMs ~/ 1000) | 1;
           setState(() {
             _progressDetail = 'Writing timestamp @ 0x${MEM_VAL_TIMESTAMP.toRadixString(16)} = $nowSec';
           });
@@ -246,6 +248,7 @@ class _MyHomePageState extends State<MyHomePage> {
             Uint8List.fromList(_le32(nowSec)),
             startBlock: MEM_VAL_TIMESTAMP ~/ 4,
           );
+          await _setLastTimestampWriteMs(nowMs);
 
           // 1) Read current values from sensor
           setState(() { _progressDetail = 'Reading measure mode @ 0x${MEM_VAL_MEASURE_MODE.toRadixString(16)}'; });
@@ -422,7 +425,8 @@ class _MyHomePageState extends State<MyHomePage> {
           // If marker found, write timestamp to that address and rewrite magic at address+4
           if (foundAddress != null) {
             final int markerAddr = foundAddress;
-            final int tsOdd = (DateTime.now().millisecondsSinceEpoch ~/ 1000) | 1;
+            final int nowMs2 = DateTime.now().millisecondsSinceEpoch;
+            final int tsOdd = (nowMs2 ~/ 1000) | 1;
             setState(() { _progressDetail = 'Writing scan timestamp @ 0x${markerAddr.toRadixString(16)} = $tsOdd'; });
             await _writeNfcVAndroid(
               vAndroid,
@@ -430,6 +434,7 @@ class _MyHomePageState extends State<MyHomePage> {
               Uint8List.fromList(_le32(tsOdd)),
               startBlock: markerAddr ~/ 4,
             );
+            await _setLastTimestampWriteMs(nowMs2);
             final int nextAddr = markerAddr + 4;
             setState(() { _progressDetail = 'Advancing marker @ 0x${nextAddr.toRadixString(16)}'; });
             await _writeNfcVAndroid(
@@ -491,7 +496,16 @@ class _MyHomePageState extends State<MyHomePage> {
       _measureMode = prefs.getInt('measureMode') ?? 0;
       _warningLevel = prefs.getInt('warningLevel') ?? 0;
       _maxLevel = prefs.getInt('maxLevel') ?? 0;
+      _lastTimestampWriteMs = prefs.getInt('lastTsWriteMs');
     });
+  }
+
+  Future<void> _setLastTimestampWriteMs(int ms) async {
+    setState(() {
+      _lastTimestampWriteMs = ms;
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('lastTsWriteMs', ms);
   }
 
   // _buildConfigBytes removed; using explicit memory-map writes instead.
@@ -670,6 +684,11 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   Text('Warning Level: $_warningLevel ug/m³', textAlign: TextAlign.center),
                   Text('Max Level: $_maxLevel ug/m³', textAlign: TextAlign.center),
+                  if (_lastTimestampWriteMs != null)
+                    Text(
+                      'Last timestamp write: ${DateTime.fromMillisecondsSinceEpoch(_lastTimestampWriteMs!).toLocal()}',
+                      textAlign: TextAlign.center,
+                    ),
                   if (_lastWriteAddress != null)
                     Text('Last Write Address: $_lastWriteAddress', textAlign: TextAlign.center),
                   const SizedBox(height: 24),
