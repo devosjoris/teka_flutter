@@ -3,6 +3,7 @@ import 'package:nfc_manager/nfc_manager.dart' as nfc;
 import 'package:nfc_manager/nfc_manager_android.dart' as android;
 import 'dart:typed_data';
 import 'dart:convert';
+import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -62,6 +63,7 @@ class _MyHomePageState extends State<MyHomePage> {
   String _nfcStatus = 'Tap "Start NFC Scan" and touch the ST25DV tag.';
   String? _eepromData;
   bool _scanning = false;
+  String? _progressDetail; // shows current read/write step
   // Memory map (byte offsets)
   static const int MEM_VAL_MEASURE_MODE = 16; // 4 bytes (block 4)
   static const int MEM_VAL_USER_NAME_LENGTH = 44; // 4 bytes (block 11)
@@ -76,6 +78,7 @@ class _MyHomePageState extends State<MyHomePage> {
   int _warningLevel = 0; // ug/m3
   int _maxLevel = 0; // ug/m3
   int? _lastWriteAddress; // discovered address of magic marker
+  Timer? _disconnectTimer; // grace timer to re-enable connect after disconnect
 
   // Big-endian helpers
   List<int> _be32(int v) => [
@@ -205,7 +208,10 @@ class _MyHomePageState extends State<MyHomePage> {
       _nfcStatus = 'Connecting... Touch the ST25DV tag to the phone.';
       _eepromData = null;
       _scanning = true;
+      _progressDetail = 'Waiting for tag...';
     });
+    _disconnectTimer?.cancel();
+    _disconnectTimer = null;
     final isAvailable = await nfc.NfcManager.instance.isAvailable();
     if (!isAvailable) {
       setState(() {
@@ -225,6 +231,7 @@ class _MyHomePageState extends State<MyHomePage> {
           final uid = vAndroid.tag.id;
 
           // 1) Read current values from sensor
+          setState(() { _progressDetail = 'Reading measure mode @ 0x${MEM_VAL_MEASURE_MODE.toRadixString(16)}'; });
           final mmBytes = await _readNfcVAndroid(
             vAndroid,
             uid,
@@ -233,6 +240,7 @@ class _MyHomePageState extends State<MyHomePage> {
           );
           final mmTag = _u32be(mmBytes);
 
+          setState(() { _progressDetail = 'Reading name length @ 0x${MEM_VAL_USER_NAME_LENGTH.toRadixString(16)}'; });
           final nameLenBytes = await _readNfcVAndroid(
             vAndroid,
             uid,
@@ -245,6 +253,7 @@ class _MyHomePageState extends State<MyHomePage> {
           final paddedNameLen = ((nameLenTag + 3) ~/ 4) * 4;
           String nameTag = '';
           if (nameLenTag > 0) {
+            setState(() { _progressDetail = 'Reading name bytes (${nameLenTag}B) starting @ 0x${MEM_VAL_USER_NAME.toRadixString(16)}'; });
             final nameBytes = await _readNfcVAndroid(
               vAndroid,
               uid,
@@ -254,6 +263,7 @@ class _MyHomePageState extends State<MyHomePage> {
             nameTag = utf8.decode(nameBytes.sublist(0, nameLenTag), allowMalformed: true);
           }
 
+          setState(() { _progressDetail = 'Reading warning level @ 0x${MEM_VAL_WARNING_LEVEL.toRadixString(16)}'; });
           final warnBytes = await _readNfcVAndroid(
             vAndroid,
             uid,
@@ -262,6 +272,7 @@ class _MyHomePageState extends State<MyHomePage> {
           );
           final warnTag = _u32be(warnBytes);
 
+          setState(() { _progressDetail = 'Reading max level @ 0x${MEM_VAL_MAX_LEVEL.toRadixString(16)}'; });
           final maxBytes = await _readNfcVAndroid(
             vAndroid,
             uid,
@@ -307,6 +318,7 @@ class _MyHomePageState extends State<MyHomePage> {
             final nameLenApp = nameBytesApp.length;
 
             // Write measure mode
+            setState(() { _progressDetail = 'Writing measure mode @ 0x${MEM_VAL_MEASURE_MODE.toRadixString(16)}'; });
             await _writeNfcVAndroid(
               vAndroid,
               uid,
@@ -314,6 +326,7 @@ class _MyHomePageState extends State<MyHomePage> {
               startBlock: MEM_VAL_MEASURE_MODE ~/ 4,
             );
             // Write name length
+            setState(() { _progressDetail = 'Writing name length @ 0x${MEM_VAL_USER_NAME_LENGTH.toRadixString(16)}'; });
             await _writeNfcVAndroid(
               vAndroid,
               uid,
@@ -325,6 +338,8 @@ class _MyHomePageState extends State<MyHomePage> {
             final totalBlocks = paddedLenApp ~/ 4;
             for (int i = 0; i < totalBlocks; i++) {
               final base = i * 4;
+              final addr = MEM_VAL_USER_NAME + base;
+              setState(() { _progressDetail = 'Writing name block @ 0x${addr.toRadixString(16)}'; });
               final chunk = Uint8List.fromList([
                 base + 0 < nameLenApp ? nameBytesApp[base + 0] : 0x00,
                 base + 1 < nameLenApp ? nameBytesApp[base + 1] : 0x00,
@@ -339,12 +354,14 @@ class _MyHomePageState extends State<MyHomePage> {
               );
             }
             // Write warning and max levels
+            setState(() { _progressDetail = 'Writing warning level @ 0x${MEM_VAL_WARNING_LEVEL.toRadixString(16)}'; });
             await _writeNfcVAndroid(
               vAndroid,
               uid,
               Uint8List.fromList(_be32(_warningLevel)),
               startBlock: MEM_VAL_WARNING_LEVEL ~/ 4,
             );
+            setState(() { _progressDetail = 'Writing max level @ 0x${MEM_VAL_MAX_LEVEL.toRadixString(16)}'; });
             await _writeNfcVAndroid(
               vAndroid,
               uid,
@@ -355,6 +372,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
           // 2) Read last_write_guess and scan for magic 0xC1EAC1EA
           const int magic = 0xC1EAC1EA;
+          setState(() { _progressDetail = 'Reading last_write_guess @ 0x${MEM_PTR_LAST_WRITE.toRadixString(16)}'; });
           final guessBytes = await _readNfcVAndroid(
             vAndroid,
             uid,
@@ -368,6 +386,7 @@ class _MyHomePageState extends State<MyHomePage> {
           int? foundAddress;
           for (int i = 0; i < maxIters; i++) {
             final addr = guess + 4 * i;
+            setState(() { _progressDetail = 'Scanning marker @ ${warnTag}'; });
             final valBytes = await _readNfcVAndroid(
               vAndroid,
               uid,
@@ -387,14 +406,28 @@ class _MyHomePageState extends State<MyHomePage> {
                 ? 'Connected. Last write marker at byte $foundAddress.'
                 : 'Connected. Last write marker not found.';
             _scanning = false;
+            _progressDetail = null;
           });
+          _disconnectTimer?.cancel();
+          _disconnectTimer = null;
           await nfc.NfcManager.instance.stopSession();
         } catch (e) {
           setState(() {
-            _nfcStatus = 'Error connecting: $e';
-            _scanning = false;
+            _nfcStatus = 'NFC error: $e\nIf the tag is removed, the session will close in 5s.';
+            // Keep _scanning true during grace period to prevent duplicate taps
           });
-          await nfc.NfcManager.instance.stopSession(errorMessageIos: e.toString());
+          _disconnectTimer?.cancel();
+          _disconnectTimer = Timer(const Duration(seconds: 5), () async {
+            if (!mounted) return;
+            setState(() {
+              _scanning = false; // re-enable button
+              _progressDetail = null;
+              _nfcStatus = 'NFC disconnected. You can connect again.';
+            });
+            try {
+              await nfc.NfcManager.instance.stopSession();
+            } catch (_) {}
+          });
         }
       },
     );
@@ -563,6 +596,13 @@ class _MyHomePageState extends State<MyHomePage> {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (_scanning) ...[
+              const LinearProgressIndicator(),
+              const SizedBox(height: 8),
+              if (_progressDetail != null)
+                Text(_progressDetail!, textAlign: TextAlign.center, style: const TextStyle(fontSize: 12)),
+              const SizedBox(height: 16),
+            ],
             // Show config summary if set
             if (_userName.isNotEmpty || _warningLevel > 0 || _maxLevel > 0 || _lastWriteAddress != null)
               Column(
