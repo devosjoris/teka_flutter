@@ -66,7 +66,7 @@ class _MyHomePageState extends State<MyHomePage> {
   String? _progressDetail; // shows current read/write step
   // Memory map (byte offsets)
   static const int MEM_VAL_TIMESTAMP = 4; // 4 bytes (block 4)
-  static const int MEM_VAL_NEWTIMESTAMP = 28; // 4 bytes (block 7)
+  static const int MEM_VAL_NEWTIMESTAMP = 36; // 4 bytes (block 7)
   // static const int MEM_PTR_TIMESTAMP = 0; // not used at the moment
 
 
