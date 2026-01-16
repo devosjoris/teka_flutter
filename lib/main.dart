@@ -356,24 +356,69 @@ class _MyHomePageState extends State<MyHomePage> {
           }
           final uid = vAndroid.tag.id;
 
-          // Local helper: read from NFC by byte address and length
-          Future<Uint8List> readNFC(int length, int address) async {
-            return await _readNfcVAndroid(
-              vAndroid,
-              uid,
-              length: length,
-              startBlock: address ~/ 4,
-            );
+          // Helper to check if error is a temporary NFC disconnect
+          bool isTemporaryDisconnect(dynamic e) {
+            final errorStr = e.toString().toLowerCase();
+            return errorStr.contains('taglost') ||
+                errorStr.contains('tag lost') ||
+                errorStr.contains('transceive') ||
+                errorStr.contains('io exception') ||
+                errorStr.contains('ioexception');
           }
 
-          // Local helper: write to NFC by byte address (data length must be block-sized multiples of 4 or will pad via underlying function)
+          // Local helper: read from NFC with retry for temporary disconnects
+          Future<Uint8List> readNFC(int length, int address) async {
+            const maxRetries = 10;
+            const retryDelayMs = 200;
+            for (int attempt = 0; attempt < maxRetries; attempt++) {
+              try {
+                return await _readNfcVAndroid(
+                  vAndroid,
+                  uid,
+                  length: length,
+                  startBlock: address ~/ 4,
+                );
+              } catch (e) {
+                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
+                  print('[NFC] Read failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...');
+                  setState(() {
+                    _progressDetail = 'NFC reconnecting... (${attempt + 1}/$maxRetries)';
+                  });
+                  await Future.delayed(Duration(milliseconds: retryDelayMs));
+                  continue;
+                }
+                rethrow;
+              }
+            }
+            throw Exception('Read failed after $maxRetries attempts');
+          }
+
+          // Local helper: write to NFC with retry for temporary disconnects
           Future<void> writeNFC(Uint8List data, int address) async {
-            await _writeNfcVAndroid(
-              vAndroid,
-              uid,
-              data,
-              startBlock: address ~/ 4,
-            );
+            const maxRetries = 10;
+            const retryDelayMs = 200;
+            for (int attempt = 0; attempt < maxRetries; attempt++) {
+              try {
+                await _writeNfcVAndroid(
+                  vAndroid,
+                  uid,
+                  data,
+                  startBlock: address ~/ 4,
+                );
+                return;
+              } catch (e) {
+                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
+                  print('[NFC] Write failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...');
+                  setState(() {
+                    _progressDetail = 'NFC reconnecting... (${attempt + 1}/$maxRetries)';
+                  });
+                  await Future.delayed(Duration(milliseconds: retryDelayMs));
+                  continue;
+                }
+                rethrow;
+              }
+            }
+            throw Exception('Write failed after $maxRetries attempts');
           }
 
           // Write current UNIX time (seconds, force LSB=1) to MEM_VAL_TIMESTAMP on connect
@@ -598,18 +643,35 @@ class _MyHomePageState extends State<MyHomePage> {
           _disconnectTimer = null;
           await nfc.NfcManager.instance.stopSession();
         } catch (e) {
+          // Check if this is a connection dropped error
+          final errorStr = e.toString().toLowerCase();
+          final isConnectionDropped = errorStr.contains('taglost') ||
+              errorStr.contains('tag lost') ||
+              errorStr.contains('transceive') ||
+              errorStr.contains('io exception') ||
+              errorStr.contains('ioexception') ||
+              errorStr.contains('connection') ||
+              errorStr.contains('removed');
+
           setState(() {
-            _nfcStatus =
-                'NFC error: $e\nIf the tag is removed, the session will close in 5s.';
+            if (isConnectionDropped) {
+              _nfcStatus = 'NFC connection dropped. Please try again.';
+            } else {
+              _nfcStatus = 'NFC error: $e';
+            }
             // Keep _scanning true during grace period to prevent duplicate taps
           });
           _disconnectTimer?.cancel();
-          _disconnectTimer = Timer(const Duration(seconds: 5), () async {
+          _disconnectTimer = Timer(const Duration(seconds: 3), () async {
             if (!mounted) return;
             setState(() {
               _scanning = false; // re-enable button
               _progressDetail = null;
-              _nfcStatus = 'NFC disconnected. You can connect again.';
+              if (isConnectionDropped) {
+                _nfcStatus = 'Connection lost. You can connect again.';
+              } else {
+                _nfcStatus = 'NFC disconnected. You can connect again.';
+              }
             });
             try {
               await nfc.NfcManager.instance.stopSession();
@@ -701,24 +763,69 @@ class _MyHomePageState extends State<MyHomePage> {
           }
           final uid = vAndroid.tag.id;
 
-          // Local helper: read from NFC by byte address and length
-          Future<Uint8List> readNFC(int length, int address) async {
-            return await _readNfcVAndroid(
-              vAndroid,
-              uid,
-              length: length,
-              startBlock: address ~/ 4,
-            );
+          // Helper to check if error is a temporary NFC disconnect
+          bool isTemporaryDisconnect(dynamic e) {
+            final errorStr = e.toString().toLowerCase();
+            return errorStr.contains('taglost') ||
+                errorStr.contains('tag lost') ||
+                errorStr.contains('transceive') ||
+                errorStr.contains('io exception') ||
+                errorStr.contains('ioexception');
           }
 
-          // Local helper: write to NFC by byte address
+          // Local helper: read from NFC with retry for temporary disconnects
+          Future<Uint8List> readNFC(int length, int address) async {
+            const maxRetries = 10;
+            const retryDelayMs = 200;
+            for (int attempt = 0; attempt < maxRetries; attempt++) {
+              try {
+                return await _readNfcVAndroid(
+                  vAndroid,
+                  uid,
+                  length: length,
+                  startBlock: address ~/ 4,
+                );
+              } catch (e) {
+                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
+                  print('[NFC] Read failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...');
+                  setState(() {
+                    _progressDetail = 'NFC reconnecting... (${attempt + 1}/$maxRetries)';
+                  });
+                  await Future.delayed(Duration(milliseconds: retryDelayMs));
+                  continue;
+                }
+                rethrow;
+              }
+            }
+            throw Exception('Read failed after $maxRetries attempts');
+          }
+
+          // Local helper: write to NFC with retry for temporary disconnects
           Future<void> writeNFC(Uint8List data, int address) async {
-            await _writeNfcVAndroid(
-              vAndroid,
-              uid,
-              data,
-              startBlock: address ~/ 4,
-            );
+            const maxRetries = 10;
+            const retryDelayMs = 200;
+            for (int attempt = 0; attempt < maxRetries; attempt++) {
+              try {
+                await _writeNfcVAndroid(
+                  vAndroid,
+                  uid,
+                  data,
+                  startBlock: address ~/ 4,
+                );
+                return;
+              } catch (e) {
+                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
+                  print('[NFC] Write failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...');
+                  setState(() {
+                    _progressDetail = 'NFC reconnecting... (${attempt + 1}/$maxRetries)';
+                  });
+                  await Future.delayed(Duration(milliseconds: retryDelayMs));
+                  continue;
+                }
+                rethrow;
+              }
+            }
+            throw Exception('Write failed after $maxRetries attempts');
           }
 
           final allEntries = <SensorLogEntry>[];
@@ -780,6 +887,7 @@ class _MyHomePageState extends State<MyHomePage> {
             }
 
             if (status == NFC_DT_STATUS_DATA_READY) {
+              print("DATA READY received from ESP32.");
               setState(() {
                 _progressDetail = 'DATA READY received.';
               });
@@ -877,7 +985,7 @@ class _MyHomePageState extends State<MyHomePage> {
             );
 
             // Wait briefly for ESP32 to process ACK
-            await Future.delayed(const Duration(milliseconds: 200));
+            await Future.delayed(const Duration(milliseconds: 2000));
 
             // Check if more data pending
             if (totalPending <= entryCount) {
@@ -906,16 +1014,34 @@ class _MyHomePageState extends State<MyHomePage> {
             _showSensorDataDialog();
           }
         } catch (e) {
+          // Check if this is a connection dropped error
+          final errorStr = e.toString().toLowerCase();
+          final isConnectionDropped = errorStr.contains('taglost') ||
+              errorStr.contains('tag lost') ||
+              errorStr.contains('transceive') ||
+              errorStr.contains('io exception') ||
+              errorStr.contains('ioexception') ||
+              errorStr.contains('connection') ||
+              errorStr.contains('removed');
+
           setState(() {
-            _nfcStatus = 'NFC error: $e';
+            if (isConnectionDropped) {
+              _nfcStatus = 'NFC connection dropped. Please try again.';
+            } else {
+              _nfcStatus = 'NFC error: $e';
+            }
           });
           _disconnectTimer?.cancel();
-          _disconnectTimer = Timer(const Duration(seconds: 5), () async {
+          _disconnectTimer = Timer(const Duration(seconds: 3), () async {
             if (!mounted) return;
             setState(() {
               _scanning = false;
               _progressDetail = null;
-              _nfcStatus = 'NFC disconnected. You can try again.';
+              if (isConnectionDropped) {
+                _nfcStatus = 'Connection lost. You can try again.';
+              } else {
+                _nfcStatus = 'NFC disconnected. You can try again.';
+              }
             });
             try {
               await nfc.NfcManager.instance.stopSession();
