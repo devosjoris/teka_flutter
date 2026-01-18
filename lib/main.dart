@@ -840,6 +840,26 @@ class _MyHomePageState extends State<MyHomePage> {
             });
             print('[NFC DT] $_progressDetail');
 
+            // Write current UNIX time (seconds, force LSB=1) to MEM_VAL_TIMESTAMP on connect
+            final int nowMs = DateTime.now().millisecondsSinceEpoch;
+            final int nowSec = (nowMs ~/ 1000) | 1;
+            setState(() {
+              _progressDetail =
+                  'Writing timestamp @ 0x${MEM_VAL_TIMESTAMP.toRadixString(16)} = $nowSec';
+            });
+            await writeNFC(Uint8List.fromList(_le32(nowSec)), MEM_VAL_TIMESTAMP);
+            await _setLastTimestampWriteMs(nowMs);
+
+            // Write fixed value 0x0000501D to MEM_VAL_NEWTIMESTAMP (little-endian)
+            setState(() {
+              _progressDetail =
+                  'Writing NEWTIMESTAMP @ 0x${MEM_VAL_NEWTIMESTAMP.toRadixString(16)} = 0x0000501D';
+            });
+            await writeNFC(
+              Uint8List.fromList(_le32(20509)),
+              MEM_VAL_NEWTIMESTAMP,
+            ); // 0x501D
+
             // Step 1: Write REQUEST_DATA command
             await writeNFC(
               Uint8List.fromList(_le32(NFC_DT_CMD_REQUEST_DATA)),
@@ -848,7 +868,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
             // Step 2: Poll for status (with timeout)
             int status = 0;
-            const maxPolls = 50; // 5 seconds max (100ms * 50)
+            const maxPolls = 5000; // 5 seconds max (100ms * 50)
             for (int poll = 0; poll < maxPolls; poll++) {
               await Future.delayed(const Duration(milliseconds: 100));
               setState(() {
