@@ -421,25 +421,8 @@ class _MyHomePageState extends State<MyHomePage> {
             throw Exception('Write failed after $maxRetries attempts');
           }
 
-          // Write current UNIX time (seconds, force LSB=1) to MEM_VAL_TIMESTAMP on connect
-          final int nowMs = DateTime.now().millisecondsSinceEpoch;
-          final int nowSec = (nowMs ~/ 1000) | 1;
-          setState(() {
-            _progressDetail =
-                'Writing timestamp @ 0x${MEM_VAL_TIMESTAMP.toRadixString(16)} = $nowSec';
-          });
-          await writeNFC(Uint8List.fromList(_le32(nowSec)), MEM_VAL_TIMESTAMP);
-          await _setLastTimestampWriteMs(nowMs);
-
-          // Write fixed value 0x0000501D to MEM_VAL_NEWTIMESTAMP (little-endian)
-          setState(() {
-            _progressDetail =
-                'Writing NEWTIMESTAMP @ 0x${MEM_VAL_NEWTIMESTAMP.toRadixString(16)} = 0x0000501D';
-          });
-          await writeNFC(
-            Uint8List.fromList(_le32(20509)),
-            MEM_VAL_NEWTIMESTAMP,
-          ); // 0x501D
+          // Write timestamp to NFC
+          await _updateNFCTimestamp(writeNFC);
 
           // 1) Read current values from sensor
           setState(() {
@@ -729,6 +712,29 @@ class _MyHomePageState extends State<MyHomePage> {
     await prefs.setInt('lastTsWriteMs', ms);
   }
 
+  // Write current UNIX timestamp and NEWTIMESTAMP marker to NFC
+  Future<void> _updateNFCTimestamp(Future<void> Function(Uint8List data, int address) writeNFC) async {
+    // Write current UNIX time (seconds, force LSB=1) to MEM_VAL_TIMESTAMP
+    final int nowMs = DateTime.now().millisecondsSinceEpoch;
+    final int nowSec = (nowMs ~/ 1000) | 1;
+    setState(() {
+      _progressDetail =
+          'Writing timestamp @ 0x${MEM_VAL_TIMESTAMP.toRadixString(16)} = $nowSec';
+    });
+    await writeNFC(Uint8List.fromList(_le32(nowSec)), MEM_VAL_TIMESTAMP);
+    await _setLastTimestampWriteMs(nowMs);
+
+    // Write fixed value 0x0000501D to MEM_VAL_NEWTIMESTAMP (little-endian)
+    setState(() {
+      _progressDetail =
+          'Writing NEWTIMESTAMP @ 0x${MEM_VAL_NEWTIMESTAMP.toRadixString(16)} = 0x0000501D';
+    });
+    await writeNFC(
+      Uint8List.fromList(_le32(20509)),
+      MEM_VAL_NEWTIMESTAMP,
+    ); // 0x501D
+  }
+
   // Read sensor values using the NFC Data Transfer Protocol
   Future<void> _readSensorValues() async {
     setState(() {
@@ -840,25 +846,8 @@ class _MyHomePageState extends State<MyHomePage> {
             });
             print('[NFC DT] $_progressDetail');
 
-            // Write current UNIX time (seconds, force LSB=1) to MEM_VAL_TIMESTAMP on connect
-            final int nowMs = DateTime.now().millisecondsSinceEpoch;
-            final int nowSec = (nowMs ~/ 1000) | 1;
-            setState(() {
-              _progressDetail =
-                  'Writing timestamp @ 0x${MEM_VAL_TIMESTAMP.toRadixString(16)} = $nowSec';
-            });
-            await writeNFC(Uint8List.fromList(_le32(nowSec)), MEM_VAL_TIMESTAMP);
-            await _setLastTimestampWriteMs(nowMs);
-
-            // Write fixed value 0x0000501D to MEM_VAL_NEWTIMESTAMP (little-endian)
-            setState(() {
-              _progressDetail =
-                  'Writing NEWTIMESTAMP @ 0x${MEM_VAL_NEWTIMESTAMP.toRadixString(16)} = 0x0000501D';
-            });
-            await writeNFC(
-              Uint8List.fromList(_le32(20509)),
-              MEM_VAL_NEWTIMESTAMP,
-            ); // 0x501D
+            // Write timestamp to NFC
+            await _updateNFCTimestamp(writeNFC);
 
             // Step 1: Write REQUEST_DATA command
             await writeNFC(
