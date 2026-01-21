@@ -576,8 +576,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
           // Local helper: read from NFC with retry for temporary disconnects
           Future<Uint8List> readNFC(int length, int address) async {
-            const maxRetries = 10;
-            const retryDelayMs = 200;
+            const maxRetries = 500;
+            const retryDelayMs = 100;
             for (int attempt = 0; attempt < maxRetries; attempt++) {
               try {
                 return await _readNfcVAndroid(
@@ -603,8 +603,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
           // Local helper: write to NFC with retry for temporary disconnects
           Future<void> writeNFC(Uint8List data, int address) async {
-            const maxRetries = 10;
-            const retryDelayMs = 200;
+            const maxRetries = 500;
+            const retryDelayMs = 100;
             for (int attempt = 0; attempt < maxRetries; attempt++) {
               try {
                 await _writeNfcVAndroid(
@@ -1020,8 +1020,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
           // Local helper: read from NFC with retry for temporary disconnects
           Future<Uint8List> readNFC(int length, int address) async {
-            const maxRetries = 10;
-            const retryDelayMs = 200;
+            const maxRetries = 500;
+            const retryDelayMs = 100;
             for (int attempt = 0; attempt < maxRetries; attempt++) {
               try {
                 return await _readNfcVAndroid(
@@ -1047,8 +1047,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
           // Local helper: write to NFC with retry for temporary disconnects
           Future<void> writeNFC(Uint8List data, int address) async {
-            const maxRetries = 10;
-            const retryDelayMs = 200;
+            const maxRetries = 500;
+            const retryDelayMs = 100;
             for (int attempt = 0; attempt < maxRetries; attempt++) {
               try {
                 await _writeNfcVAndroid(
@@ -1096,7 +1096,7 @@ class _MyHomePageState extends State<MyHomePage> {
 
             // Step 2: Poll for status (with timeout)
             int status = 0;
-            const maxPolls = 5000; // 5 seconds max (100ms * 50)
+            const maxPolls = 20000; // 5 seconds max (100ms * 50)
             for (int poll = 0; poll < maxPolls; poll++) {
               await Future.delayed(const Duration(milliseconds: 100));
               setState(() {
