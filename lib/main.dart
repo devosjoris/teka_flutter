@@ -780,48 +780,8 @@ class _MyHomePageState extends State<MyHomePage> {
             );
           }
 
-          // 2) Read last_write_guess and scan for magic 0xC1EAC1EA in ring buffer region
-          const int magic = 0xC1EAC1EA;
-          setState(() {
-            _progressDetail =
-                'Reading last_write_guess @ 0x${MEM_PTR_LAST_WRITE.toRadixString(16)}';
-          });
-          final guessBytes = await readNFC(4, MEM_PTR_LAST_WRITE);
-          int guess = _u32le(guessBytes);
-          // Clamp guess into ring region and align to 4
-          if (guess < MEM_VAL_DATA_START) guess = MEM_VAL_DATA_START;
-          if (guess > MEM_VAL_DATA_END) guess = MEM_VAL_DATA_START;
-          guess = (guess ~/ 4) * 4;
-          // Iterate over the ring once max
-          final int ringSpan =
-              MEM_VAL_DATA_END -
-              MEM_VAL_DATA_START +
-              4; // inclusive end, 4-byte step
-          final int maxIters = (ringSpan ~/ 4);
           int? foundAddress;
-          int addr = guess;
-          for (int i = 0; i < maxIters; i++) {
-            setState(() {
-              _progressDetail = 'Scanning marker @ ${addr}';
-            });
-            final valBytes = await readNFC(4, addr);
-            final val = _u32le(valBytes);
-            // Verbose terminal logging for scan loop: address and decoded value (hex)
-            print(
-              "[NFC] scan addr=0x${addr.toRadixString(16)} val=0x${val.toRadixString(16).padLeft(8, '0')}",
-            );
-            if (val == magic) {
-              foundAddress = addr;
-              break;
-            }
-            // advance with wrap in ring
-            addr += 4;
-            if (addr > MEM_VAL_DATA_END) addr = MEM_VAL_DATA_START;
-          }
-
-          // If marker found, write timestamp to that address and rewrite magic at address+4
-          if (foundAddress != null) {}
-
+          foundAddress = 200; //obsolete, not used anymore
           setState(() {
             _lastWriteAddress = foundAddress;
             _nfcStatus = foundAddress != null
@@ -1619,7 +1579,7 @@ class _MyHomePageState extends State<MyHomePage> {
             ElevatedButton.icon(
               onPressed: _scanning ? _stopScanning : _connectToSensor,
               icon: Icon(_scanning ? Icons.stop : Icons.sync),
-              label: Text(_scanning ? 'Stop scanning' : 'Connect to sensor'),
+              label: Text(_scanning ? 'Stop scanning' : 'Update Sensor Settings'),
             ),
             const SizedBox(height: 12),
             ElevatedButton.icon(
