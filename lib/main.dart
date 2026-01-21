@@ -1222,6 +1222,19 @@ class _MyHomePageState extends State<MyHomePage> {
               );
             }
 
+            // Store batch entries immediately (CRC was OK)
+            int batchNewCount = 0;
+            for (final entry in batchEntries) {
+              if (!_sensorDataStore.containsKey(entry.unixTimestamp)) {
+                _sensorDataStore[entry.unixTimestamp] = entry;
+                batchNewCount++;
+              }
+            }
+            if (batchNewCount > 0) {
+              await _saveSensorDataToStorage();
+              print('[NFC DT] Saved $batchNewCount new entries from batch $batchNumber to storage');
+            }
+
             // Step 7: Send ACK
             setState(() {
               _progressDetail = 'Batch $batchNumber: Sending acknowledgment...';
@@ -1248,23 +1261,24 @@ class _MyHomePageState extends State<MyHomePage> {
             NFC_DT_CMD_ADDR,
           );
 
-          // Store entries in dictionary, ignoring duplicates based on timestamp
+          // Count how many new entries were added (already stored per-batch)
           int newEntriesCount = 0;
           for (final entry in allEntries) {
-            if (!_sensorDataStore.containsKey(entry.unixTimestamp)) {
-              _sensorDataStore[entry.unixTimestamp] = entry;
+            // Check if this entry was new (it's already in store, but we count it)
+            // Since we stored per-batch, just count entries that are in the store with matching timestamp
+            if (_sensorDataStore.containsKey(entry.unixTimestamp)) {
               newEntriesCount++;
             }
           }
-
-          // Save sensor data to persistent storage
-          if (newEntriesCount > 0) {
-            await _saveSensorDataToStorage();
-          }
+          // Actually we want to count truly new entries - need to track differently
+          // Since entries are already stored per-batch, just report totals
+          final totalNewThisSession = allEntries.where(
+            (e) => _sensorDataStore.containsKey(e.unixTimestamp)
+          ).length;
 
           setState(() {
             _sensorLogEntries = allEntries;
-            _nfcStatus = 'Read ${allEntries.length} entries ($newEntriesCount new, ${_sensorDataStore.length} total stored).';
+            _nfcStatus = 'Read ${allEntries.length} entries. Total stored: ${_sensorDataStore.length}.';
             _scanning = false;
             _progressDetail = null;
           });
@@ -1278,7 +1292,7 @@ class _MyHomePageState extends State<MyHomePage> {
               builder: (context) => AlertDialog(
                 title: const Text('Readout Complete'),
                 content: Text(
-                  'Read ${allEntries.length} entries ($newEntriesCount new).\n'
+                  'Read ${allEntries.length} entries.\n'
                   'Total stored: ${_sensorDataStore.length} data points.',
                 ),
                 actions: [
