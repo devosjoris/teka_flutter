@@ -77,6 +77,21 @@ class SensorLogEntry {
   DateTime get dateTime =>
       DateTime.fromMillisecondsSinceEpoch(unixTimestamp * 1000);
 
+  // JSON serialization for persistence
+  Map<String, dynamic> toJson() => {
+    'sensorValue': sensorValue,
+    'unixTimestamp': unixTimestamp,
+    'rtcValid': rtcValid,
+    'readoutDone': readoutDone,
+  };
+
+  factory SensorLogEntry.fromJson(Map<String, dynamic> json) => SensorLogEntry(
+    sensorValue: json['sensorValue'] as int,
+    unixTimestamp: json['unixTimestamp'] as int,
+    rtcValid: json['rtcValid'] as bool,
+    readoutDone: json['readoutDone'] as bool,
+  );
+
   @override
   String toString() {
     return 'SensorLogEntry(value: $sensorValue, time: $dateTime, rtcValid: $rtcValid)';
@@ -895,6 +910,37 @@ class _MyHomePageState extends State<MyHomePage> {
       _maxLevel = prefs.getInt('maxLevel') ?? 0;
       _lastTimestampWriteMs = prefs.getInt('lastTsWriteMs');
     });
+    // Load sensor data from storage
+    await _loadSensorDataFromStorage();
+  }
+
+  // Save sensor data to persistent storage
+  Future<void> _saveSensorDataToStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> jsonList = _sensorDataStore.values
+        .map((entry) => jsonEncode(entry.toJson()))
+        .toList();
+    await prefs.setStringList('sensorData', jsonList);
+  }
+
+  // Load sensor data from persistent storage
+  Future<void> _loadSensorDataFromStorage() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String>? jsonList = prefs.getStringList('sensorData');
+    if (jsonList != null) {
+      setState(() {
+        _sensorDataStore.clear();
+        for (final jsonStr in jsonList) {
+          try {
+            final entry = SensorLogEntry.fromJson(jsonDecode(jsonStr));
+            _sensorDataStore[entry.unixTimestamp] = entry;
+          } catch (e) {
+            print('[Storage] Failed to parse sensor entry: $e');
+          }
+        }
+      });
+      print('[Storage] Loaded ${_sensorDataStore.length} sensor entries from storage');
+    }
   }
 
   Future<void> _setLastTimestampWriteMs(int ms) async {
@@ -1209,6 +1255,11 @@ class _MyHomePageState extends State<MyHomePage> {
               _sensorDataStore[entry.unixTimestamp] = entry;
               newEntriesCount++;
             }
+          }
+
+          // Save sensor data to persistent storage
+          if (newEntriesCount > 0) {
+            await _saveSensorDataToStorage();
           }
 
           setState(() {
