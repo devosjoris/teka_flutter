@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:fl_chart/fl_chart.dart';
 
 void main() {
   runApp(const MyApp());
@@ -82,6 +83,195 @@ class SensorLogEntry {
   }
 }
 
+// Show Data Page - displays a chart of sensor data over time
+class ShowDataPage extends StatelessWidget {
+  final Map<int, SensorLogEntry> sensorData;
+
+  const ShowDataPage({super.key, required this.sensorData});
+
+  @override
+  Widget build(BuildContext context) {
+    // Sort entries by timestamp
+    final sortedEntries = sensorData.values.toList()
+      ..sort((a, b) => a.unixTimestamp.compareTo(b.unixTimestamp));
+
+    if (sortedEntries.isEmpty) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('Sensor Data'),
+          backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        ),
+        body: const Center(
+          child: Text('No sensor data available.\nRead sensor values first.'),
+        ),
+      );
+    }
+
+    // Create chart data points
+    final spots = sortedEntries.asMap().entries.map((e) {
+      return FlSpot(e.key.toDouble(), e.value.sensorValue.toDouble());
+    }).toList();
+
+    // Calculate min/max for Y axis
+    final minValue = sortedEntries.map((e) => e.sensorValue).reduce((a, b) => a < b ? a : b);
+    final maxValue = sortedEntries.map((e) => e.sensorValue).reduce((a, b) => a > b ? a : b);
+    final yMin = (minValue * 0.9).floorToDouble();
+    final yMax = (maxValue * 1.1).ceilToDouble();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Sensor Data (${sortedEntries.length} points)'),
+        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            // Time range info
+            Text(
+              'From: ${sortedEntries.first.dateTime.toLocal()}',
+              style: const TextStyle(fontSize: 12),
+            ),
+            Text(
+              'To: ${sortedEntries.last.dateTime.toLocal()}',
+              style: const TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 16),
+            // Chart
+            Expanded(
+              child: LineChart(
+                LineChartData(
+                  gridData: FlGridData(
+                    show: true,
+                    drawVerticalLine: true,
+                    horizontalInterval: (yMax - yMin) / 5,
+                    verticalInterval: sortedEntries.length > 10 ? sortedEntries.length / 5 : 1,
+                  ),
+                  titlesData: FlTitlesData(
+                    show: true,
+                    rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
+                    bottomTitles: AxisTitles(
+                      axisNameWidget: const Text('Time'),
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 50,
+                        interval: sortedEntries.length > 10 ? sortedEntries.length / 5 : 1,
+                        getTitlesWidget: (value, meta) {
+                          final index = value.toInt();
+                          if (index < 0 || index >= sortedEntries.length) {
+                            return const SizedBox.shrink();
+                          }
+                          final entry = sortedEntries[index];
+                          final dt = entry.dateTime.toLocal();
+                          return SideTitleWidget(
+                            axisSide: meta.axisSide,
+                            child: Transform.rotate(
+                              angle: -0.5,
+                              child: Text(
+                                '${dt.month}/${dt.day}\n${dt.hour}:${dt.minute.toString().padLeft(2, '0')}',
+                                style: const TextStyle(fontSize: 9),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    leftTitles: AxisTitles(
+                      axisNameWidget: const Text('µg/m³'),
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        interval: (yMax - yMin) / 5,
+                        reservedSize: 50,
+                        getTitlesWidget: (value, meta) {
+                          return Text(
+                            value.toInt().toString(),
+                            style: const TextStyle(fontSize: 10),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                  borderData: FlBorderData(
+                    show: true,
+                    border: Border.all(color: Colors.grey),
+                  ),
+                  minX: 0,
+                  maxX: (sortedEntries.length - 1).toDouble(),
+                  minY: yMin,
+                  maxY: yMax,
+                  lineBarsData: [
+                    LineChartBarData(
+                      spots: spots,
+                      isCurved: true,
+                      curveSmoothness: 0.2,
+                      color: Theme.of(context).colorScheme.primary,
+                      barWidth: 2,
+                      isStrokeCapRound: true,
+                      dotData: FlDotData(
+                        show: sortedEntries.length <= 50,
+                      ),
+                      belowBarData: BarAreaData(
+                        show: true,
+                        color: Theme.of(context).colorScheme.primary.withOpacity(0.2),
+                      ),
+                    ),
+                  ],
+                  lineTouchData: LineTouchData(
+                    touchTooltipData: LineTouchTooltipData(
+                      getTooltipItems: (touchedSpots) {
+                        return touchedSpots.map((spot) {
+                          final index = spot.x.toInt();
+                          if (index < 0 || index >= sortedEntries.length) {
+                            return null;
+                          }
+                          final entry = sortedEntries[index];
+                          return LineTooltipItem(
+                            '${entry.sensorValue} µg/m³\n${entry.dateTime.toLocal()}',
+                            const TextStyle(color: Colors.white, fontSize: 12),
+                          );
+                        }).toList();
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Data list
+            Expanded(
+              child: ListView.builder(
+                itemCount: sortedEntries.length,
+                itemBuilder: (context, index) {
+                  final entry = sortedEntries[sortedEntries.length - 1 - index]; // Newest first
+                  return ListTile(
+                    dense: true,
+                    title: Text(
+                      '${entry.sensorValue} µg/m³',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    subtitle: Text(
+                      '${entry.dateTime.toLocal()}${entry.rtcValid ? '' : ' (RTC invalid)'}',
+                    ),
+                    leading: Text(
+                      '${sortedEntries.length - index}',
+                      style: const TextStyle(color: Colors.grey),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _MyHomePageState extends State<MyHomePage> {
   String _nfcStatus = 'Tap "Start NFC Scan" and touch the ST25DV tag.';
   String? _eepromData;
@@ -134,6 +324,9 @@ class _MyHomePageState extends State<MyHomePage> {
 
   // Sensor log entries read from device
   List<SensorLogEntry> _sensorLogEntries = [];
+
+  // Stored sensor data - dictionary with timestamp as key to avoid duplicates
+  final Map<int, SensorLogEntry> _sensorDataStore = {};
 
   // Config fields
   String _userName = '';
@@ -1009,9 +1202,18 @@ class _MyHomePageState extends State<MyHomePage> {
             NFC_DT_CMD_ADDR,
           );
 
+          // Store entries in dictionary, ignoring duplicates based on timestamp
+          int newEntriesCount = 0;
+          for (final entry in allEntries) {
+            if (!_sensorDataStore.containsKey(entry.unixTimestamp)) {
+              _sensorDataStore[entry.unixTimestamp] = entry;
+              newEntriesCount++;
+            }
+          }
+
           setState(() {
             _sensorLogEntries = allEntries;
-            _nfcStatus = 'Read ${allEntries.length} sensor log entries.';
+            _nfcStatus = 'Read ${allEntries.length} entries ($newEntriesCount new, ${_sensorDataStore.length} total stored).';
             _scanning = false;
             _progressDetail = null;
           });
@@ -1344,6 +1546,19 @@ class _MyHomePageState extends State<MyHomePage> {
               onPressed: _scanning ? null : _readSensorValues,
               icon: const Icon(Icons.download),
               label: const Text('Read Sensor Values'),
+            ),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => ShowDataPage(sensorData: _sensorDataStore),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.show_chart),
+              label: Text('Show Data (${_sensorDataStore.length} points)'),
             ),
             if (_sensorLogEntries.isNotEmpty) ...[
               const SizedBox(height: 12),
