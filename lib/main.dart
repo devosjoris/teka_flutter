@@ -1220,9 +1220,24 @@ class _MyHomePageState extends State<MyHomePage> {
 
           await nfc.NfcManager.instance.stopSession();
 
-          // Show results dialog
-          if (mounted && allEntries.isNotEmpty) {
-            _showSensorDataDialog();
+          // Show readout complete dialog
+          if (mounted) {
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Readout Complete'),
+                content: Text(
+                  'Read ${allEntries.length} entries ($newEntriesCount new).\n'
+                  'Total stored: ${_sensorDataStore.length} data points.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+            );
           }
         } catch (e) {
           // Check if this is a connection dropped error
