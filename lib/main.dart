@@ -855,10 +855,11 @@ class _MyHomePageState extends State<MyHomePage> {
     await _loadSensorDataFromStorage();
   }
 
-  // Save sensor data to persistent storage
+  // Save sensor data to persistent storage (skip entries with sensorValue = 4095)
   Future<void> _saveSensorDataToStorage() async {
     final prefs = await SharedPreferences.getInstance();
     final List<String> jsonList = _sensorDataStore.values
+        .where((entry) => entry.sensorValue != 4095)
         .map((entry) => jsonEncode(entry.toJson()))
         .toList();
     await prefs.setStringList('sensorData', jsonList);
