@@ -4,10 +4,9 @@ import 'package:nfc_manager/nfc_manager_android.dart' as android;
 import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:async';
-import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'package:file_picker/file_picker.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   runApp(const MyApp());
@@ -130,8 +129,12 @@ class ShowDataPage extends StatelessWidget {
     }).toList();
 
     // Calculate min/max for Y axis
-    final minValue = sortedEntries.map((e) => e.sensorValue).reduce((a, b) => a < b ? a : b);
-    final maxValue = sortedEntries.map((e) => e.sensorValue).reduce((a, b) => a > b ? a : b);
+    final minValue = sortedEntries
+        .map((e) => e.sensorValue)
+        .reduce((a, b) => a < b ? a : b);
+    final maxValue = sortedEntries
+        .map((e) => e.sensorValue)
+        .reduce((a, b) => a > b ? a : b);
     final yMin = (minValue * 0.9).floorToDouble();
     final yMax = (maxValue * 1.1).ceilToDouble();
 
@@ -162,7 +165,9 @@ class ShowDataPage extends StatelessWidget {
                     show: true,
                     drawVerticalLine: true,
                     horizontalInterval: (yMax - yMin) / 5,
-                    verticalInterval: sortedEntries.length > 10 ? sortedEntries.length / 5 : 1,
+                    verticalInterval: sortedEntries.length > 10
+                        ? sortedEntries.length / 5
+                        : 1,
                   ),
                   titlesData: FlTitlesData(
                     show: true,
@@ -177,7 +182,9 @@ class ShowDataPage extends StatelessWidget {
                       sideTitles: SideTitles(
                         showTitles: true,
                         reservedSize: 50,
-                        interval: sortedEntries.length > 10 ? sortedEntries.length / 5 : 1,
+                        interval: sortedEntries.length > 10
+                            ? sortedEntries.length / 5
+                            : 1,
                         getTitlesWidget: (value, meta) {
                           final index = value.toInt();
                           if (index < 0 || index >= sortedEntries.length) {
@@ -229,12 +236,12 @@ class ShowDataPage extends StatelessWidget {
                       color: Theme.of(context).colorScheme.primary,
                       barWidth: 2,
                       isStrokeCapRound: true,
-                      dotData: FlDotData(
-                        show: sortedEntries.length <= 50,
-                      ),
+                      dotData: FlDotData(show: sortedEntries.length <= 50),
                       belowBarData: BarAreaData(
                         show: true,
-                        color: Theme.of(context).colorScheme.primary.withOpacity(0.2),
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.primary.withOpacity(0.2),
                       ),
                     ),
                   ],
@@ -264,7 +271,10 @@ class ShowDataPage extends StatelessWidget {
               child: ListView.builder(
                 itemCount: sortedEntries.length,
                 itemBuilder: (context, index) {
-                  final entry = sortedEntries[sortedEntries.length - 1 - index]; // Newest first
+                  final entry =
+                      sortedEntries[sortedEntries.length -
+                          1 -
+                          index]; // Newest first
                   return ListTile(
                     dense: true,
                     title: Text(
@@ -306,8 +316,8 @@ class _MyHomePageState extends State<MyHomePage> {
   static const int MEM_VAL_MAX_LEVEL = 84; // 4 bytes (block 21)
   static const int MEM_PTR_LAST_WRITE = 8; // 4 bytes (block 2)
 
-
-  static const int MEM_VAL_NEW_SETTINGS = 32; //so the tag knows that the settings have been updated (username....)
+  static const int MEM_VAL_NEW_SETTINGS =
+      32; //so the tag knows that the settings have been updated (username....)
 
   // Data Transfer Protocol addresses (from nfc_data_transfer.h)
   static const int NFC_DT_CMD_ADDR = 0x60; // 96 - Command field
@@ -321,7 +331,6 @@ class _MyHomePageState extends State<MyHomePage> {
   static const int NFC_DT_DATA_START_ADDR = 0xC8; // 200 - Start of data payload
   static const int NFC_DT_ENTRY_SIZE = 12; // Each log entry is 12 bytes
 
-  
   static const int MEM_VAL_DATA_START = 200;
   static const int MEM_VAL_DATA_END = 8188;
 
@@ -344,17 +353,41 @@ class _MyHomePageState extends State<MyHomePage> {
   static const int NFC_DT_STATUS_ERROR = 0x45525221; // 'ERR!' - Error
   static const int NFC_DT_STATUS_BUSY = 0x42555359; // 'BUSY' - Processing
 
-  // NFC OTA Protocol constants (for firmware updates via mailbox)
-  static const int NFC_OTA_MAGIC = 0x544F464E; // 'NFOT' little-endian
-  static const int NFC_OTA_VERSION = 1;
-  static const int NFC_OTA_MSG_START = 1; // Start OTA transfer
-  static const int NFC_OTA_MSG_DATA = 2; // Data chunk
-  static const int NFC_OTA_MSG_END = 3; // End transfer
-  static const int NFC_OTA_MSG_ABORT = 4; // Abort transfer
-  static const int NFC_OTA_MAX_MAILBOX_LEN = 255;
-  static const int NFC_OTA_HEADER_LEN = 16;
-  static const int NFC_OTA_MAX_PAYLOAD_LEN = 239; // 255 - 16
-  static const int NFC_OTA_CHUNK_SIZE = 200; // Recommended chunk size
+  // NFC OTA Protocol constants (EEPROM-based, similar to data transfer)
+  // OTA uses a dedicated memory area in the ST25DV EEPROM
+  static const int NFC_OTA_CMD_ADDR = 0x78; // 120 - OTA Command field
+  static const int NFC_OTA_STATUS_ADDR = 0x7C; // 124 - OTA Status field
+  static const int NFC_OTA_CHUNK_NUM_ADDR = 0x80; // 128 - Current chunk number
+  static const int NFC_OTA_TOTAL_SIZE_ADDR = 0x84; // 132 - Total firmware size
+  static const int NFC_OTA_CHUNK_SIZE_ADDR = 0x88; // 136 - Current chunk size
+  static const int NFC_OTA_CRC32_ADDR = 0x8C; // 140 - CRC32 of chunk data
+  static const int NFC_OTA_DATA_ADDR =
+      0xC8; // 200 - OTA data payload start (same as sensor data)
+
+  // OTA Commands (written by app to NFC_OTA_CMD_ADDR)
+  static const int NFC_OTA_CMD_NONE = 0x00000000; // No command / idle
+  static const int NFC_OTA_CMD_START =
+      0x4F544153; // 'OTAS' - Start OTA transfer
+  static const int NFC_OTA_CMD_DATA = 0x4F544144; // 'OTAD' - Data chunk ready
+  static const int NFC_OTA_CMD_END = 0x4F544145; // 'OTAE' - End transfer
+  static const int NFC_OTA_CMD_ABORT = 0x4F544158; // 'OTAX' - Abort transfer
+
+  // OTA Status (written by ESP32 to NFC_OTA_STATUS_ADDR)
+  static const int NFC_OTA_STATUS_IDLE = 0x00000000; // Idle
+  static const int NFC_OTA_STATUS_READY =
+      0x4F545259; // 'OTRY' - Ready for next chunk
+  static const int NFC_OTA_STATUS_BUSY =
+      0x4F544259; // 'OTBY' - Processing chunk
+  static const int NFC_OTA_STATUS_ERROR = 0x4F544552; // 'OTER' - Error occurred
+  static const int NFC_OTA_STATUS_DONE =
+      0x4F54444E; // 'OTDN' - OTA complete, rebooting
+
+  // OTA chunk size (fits in EEPROM data area)
+  static const int NFC_OTA_MAX_CHUNK_SIZE =
+      1800; // Max bytes per chunk (leave room for metadata)
+
+  // Firmware download URL
+  static const String FIRMWARE_BASE_URL = 'https://www.devosjoris.be/teka_fw';
 
   // Sensor log entries read from device
   List<SensorLogEntry> _sensorLogEntries = [];
@@ -607,9 +640,12 @@ class _MyHomePageState extends State<MyHomePage> {
                 );
               } catch (e) {
                 if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
-                  print('[NFC] Read failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...');
+                  print(
+                    '[NFC] Read failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...',
+                  );
                   setState(() {
-                    _progressDetail = 'NFC reconnecting... (${attempt + 1}/$maxRetries)';
+                    _progressDetail =
+                        'NFC reconnecting... (${attempt + 1}/$maxRetries)';
                   });
                   await Future.delayed(Duration(milliseconds: retryDelayMs));
                   continue;
@@ -635,9 +671,12 @@ class _MyHomePageState extends State<MyHomePage> {
                 return;
               } catch (e) {
                 if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
-                  print('[NFC] Write failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...');
+                  print(
+                    '[NFC] Write failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...',
+                  );
                   setState(() {
-                    _progressDetail = 'NFC reconnecting... (${attempt + 1}/$maxRetries)';
+                    _progressDetail =
+                        'NFC reconnecting... (${attempt + 1}/$maxRetries)';
                   });
                   await Future.delayed(Duration(milliseconds: retryDelayMs));
                   continue;
@@ -649,7 +688,11 @@ class _MyHomePageState extends State<MyHomePage> {
           }
 
           // Helper: write to NFC with state update
-          Future<void> writeNFCWithStatus(Uint8List data, int address, String description) async {
+          Future<void> writeNFCWithStatus(
+            Uint8List data,
+            int address,
+            String description,
+          ) async {
             setState(() {
               _progressDetail = '$description @ 0x${address.toRadixString(16)}';
             });
@@ -657,12 +700,24 @@ class _MyHomePageState extends State<MyHomePage> {
           }
 
           // Helper: write 32-bit value to NFC with state update
-          Future<void> writeNFC32WithStatus(int value, int address, String description) async {
-            await writeNFCWithStatus(Uint8List.fromList(_le32(value)), address, description);
+          Future<void> writeNFC32WithStatus(
+            int value,
+            int address,
+            String description,
+          ) async {
+            await writeNFCWithStatus(
+              Uint8List.fromList(_le32(value)),
+              address,
+              description,
+            );
           }
 
           // Helper: read from NFC with state update
-          Future<Uint8List> readNFCWithStatus(int length, int address, String description) async {
+          Future<Uint8List> readNFCWithStatus(
+            int length,
+            int address,
+            String description,
+          ) async {
             setState(() {
               _progressDetail = '$description @ 0x${address.toRadixString(16)}';
             });
@@ -673,27 +728,47 @@ class _MyHomePageState extends State<MyHomePage> {
           await _updateNFCTimestamp(writeNFC);
 
           // 1) Read current values from sensor
-          final mmBytes = await readNFCWithStatus(4, MEM_VAL_MEASURE_MODE, 'Reading measure mode');
+          final mmBytes = await readNFCWithStatus(
+            4,
+            MEM_VAL_MEASURE_MODE,
+            'Reading measure mode',
+          );
           final mmTag = _u32le(mmBytes);
 
-          final nameLenBytes = await readNFCWithStatus(4, MEM_VAL_USER_NAME_LENGTH, 'Reading name length');
+          final nameLenBytes = await readNFCWithStatus(
+            4,
+            MEM_VAL_USER_NAME_LENGTH,
+            'Reading name length',
+          );
           int nameLenTag = _u32le(nameLenBytes);
           if (nameLenTag < 0) nameLenTag = 0;
           if (nameLenTag > 30) nameLenTag = 30;
           final paddedNameLen = ((nameLenTag + 3) ~/ 4) * 4;
           String nameTag = '';
           if (nameLenTag > 0) {
-            final nameBytes = await readNFCWithStatus(paddedNameLen, MEM_VAL_USER_NAME, 'Reading name bytes (${nameLenTag}B)');
+            final nameBytes = await readNFCWithStatus(
+              paddedNameLen,
+              MEM_VAL_USER_NAME,
+              'Reading name bytes (${nameLenTag}B)',
+            );
             nameTag = utf8.decode(
               nameBytes.sublist(0, nameLenTag),
               allowMalformed: true,
             );
           }
 
-          final warnBytes = await readNFCWithStatus(4, MEM_VAL_WARNING_LEVEL, 'Reading warning level');
+          final warnBytes = await readNFCWithStatus(
+            4,
+            MEM_VAL_WARNING_LEVEL,
+            'Reading warning level',
+          );
           final warnTag = _u32le(warnBytes);
 
-          final maxBytes = await readNFCWithStatus(4, MEM_VAL_MAX_LEVEL, 'Reading max level');
+          final maxBytes = await readNFCWithStatus(
+            4,
+            MEM_VAL_MAX_LEVEL,
+            'Reading max level',
+          );
           final maxTag = _u32le(maxBytes);
 
           // Compare with app values
@@ -746,9 +821,16 @@ class _MyHomePageState extends State<MyHomePage> {
             final nameLenApp = nameBytesApp.length;
 
             // Write measure mode
-            writeNFC32WithStatus(_measureMode,MEM_VAL_MEASURE_MODE,'Writing measure mode');
-            writeNFC32WithStatus(nameLenApp,MEM_VAL_USER_NAME_LENGTH,'Writing name length');
-
+            writeNFC32WithStatus(
+              _measureMode,
+              MEM_VAL_MEASURE_MODE,
+              'Writing measure mode',
+            );
+            writeNFC32WithStatus(
+              nameLenApp,
+              MEM_VAL_USER_NAME_LENGTH,
+              'Writing name length',
+            );
 
             // Write name bytes
             final paddedLenApp = ((nameLenApp + 3) ~/ 4) * 4;
@@ -770,9 +852,21 @@ class _MyHomePageState extends State<MyHomePage> {
             }
             // Write warning and max levels
 
-            writeNFC32WithStatus(_warningLevel,MEM_VAL_WARNING_LEVEL,'Writing warning level');
-            writeNFC32WithStatus(_maxLevel,MEM_VAL_MAX_LEVEL,'Writing max level');
-            writeNFC32WithStatus(0x0000501D,MEM_VAL_NEW_SETTINGS,'Writing new settings');
+            writeNFC32WithStatus(
+              _warningLevel,
+              MEM_VAL_WARNING_LEVEL,
+              'Writing warning level',
+            );
+            writeNFC32WithStatus(
+              _maxLevel,
+              MEM_VAL_MAX_LEVEL,
+              'Writing max level',
+            );
+            writeNFC32WithStatus(
+              0x0000501D,
+              MEM_VAL_NEW_SETTINGS,
+              'Writing new settings',
+            );
           }
 
           int? foundAddress;
@@ -791,7 +885,8 @@ class _MyHomePageState extends State<MyHomePage> {
         } catch (e) {
           // Check if this is a connection dropped error
           final errorStr = e.toString().toLowerCase();
-          final isConnectionDropped = errorStr.contains('taglost') ||
+          final isConnectionDropped =
+              errorStr.contains('taglost') ||
               errorStr.contains('tag lost') ||
               errorStr.contains('transceive') ||
               errorStr.contains('io exception') ||
@@ -895,7 +990,9 @@ class _MyHomePageState extends State<MyHomePage> {
           }
         }
       });
-      print('[Storage] Loaded ${_sensorDataStore.length} sensor entries from storage');
+      print(
+        '[Storage] Loaded ${_sensorDataStore.length} sensor entries from storage',
+      );
     }
   }
 
@@ -908,7 +1005,9 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   // Write current UNIX timestamp and NEWTIMESTAMP marker to NFC
-  Future<void> _updateNFCTimestamp(Future<void> Function(Uint8List data, int address) writeNFC) async {
+  Future<void> _updateNFCTimestamp(
+    Future<void> Function(Uint8List data, int address) writeNFC,
+  ) async {
     // Write current UNIX time (seconds, force LSB=1) to MEM_VAL_TIMESTAMP
     final int nowMs = DateTime.now().millisecondsSinceEpoch;
     final int nowSec = (nowMs ~/ 1000) | 1;
@@ -988,9 +1087,12 @@ class _MyHomePageState extends State<MyHomePage> {
                 );
               } catch (e) {
                 if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
-                  print('[NFC] Read failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...');
+                  print(
+                    '[NFC] Read failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...',
+                  );
                   setState(() {
-                    _progressDetail = 'NFC reconnecting... (${attempt + 1}/$maxRetries)';
+                    _progressDetail =
+                        'NFC reconnecting... (${attempt + 1}/$maxRetries)';
                   });
                   await Future.delayed(Duration(milliseconds: retryDelayMs));
                   continue;
@@ -1016,9 +1118,12 @@ class _MyHomePageState extends State<MyHomePage> {
                 return;
               } catch (e) {
                 if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
-                  print('[NFC] Write failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...');
+                  print(
+                    '[NFC] Write failed (attempt ${attempt + 1}/$maxRetries), retrying in ${retryDelayMs}ms...',
+                  );
                   setState(() {
-                    _progressDetail = 'NFC reconnecting... (${attempt + 1}/$maxRetries)';
+                    _progressDetail =
+                        'NFC reconnecting... (${attempt + 1}/$maxRetries)';
                   });
                   await Future.delayed(Duration(milliseconds: retryDelayMs));
                   continue;
@@ -1138,9 +1243,13 @@ class _MyHomePageState extends State<MyHomePage> {
             // Log raw bytes (24 bytes per line = 2 entries)
             print('[NFC DT] Raw data payload ($dataLength bytes):');
             for (int i = 0; i < dataPayload.length; i += 24) {
-              final end = (i + 24 < dataPayload.length) ? i + 24 : dataPayload.length;
+              final end = (i + 24 < dataPayload.length)
+                  ? i + 24
+                  : dataPayload.length;
               final chunk = dataPayload.sublist(i, end);
-              final hexLine = chunk.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+              final hexLine = chunk
+                  .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                  .join(' ');
               print('[NFC DT]   ${i.toString().padLeft(4, '0')}: $hexLine');
             }
 
@@ -1188,7 +1297,9 @@ class _MyHomePageState extends State<MyHomePage> {
             }
             if (batchNewCount > 0) {
               await _saveSensorDataToStorage();
-              print('[NFC DT] Saved $batchNewCount new entries from batch $batchNumber to storage');
+              print(
+                '[NFC DT] Saved $batchNewCount new entries from batch $batchNumber to storage',
+              );
             }
 
             // Step 7: Send ACK
@@ -1228,13 +1339,14 @@ class _MyHomePageState extends State<MyHomePage> {
           }
           // Actually we want to count truly new entries - need to track differently
           // Since entries are already stored per-batch, just report totals
-          final totalNewThisSession = allEntries.where(
-            (e) => _sensorDataStore.containsKey(e.unixTimestamp)
-          ).length;
+          final totalNewThisSession = allEntries
+              .where((e) => _sensorDataStore.containsKey(e.unixTimestamp))
+              .length;
 
           setState(() {
             _sensorLogEntries = allEntries;
-            _nfcStatus = 'Read ${allEntries.length} entries. Total stored: ${_sensorDataStore.length}.';
+            _nfcStatus =
+                'Read ${allEntries.length} entries. Total stored: ${_sensorDataStore.length}.';
             _scanning = false;
             _progressDetail = null;
           });
@@ -1263,7 +1375,8 @@ class _MyHomePageState extends State<MyHomePage> {
         } catch (e) {
           // Check if this is a connection dropped error
           final errorStr = e.toString().toLowerCase();
-          final isConnectionDropped = errorStr.contains('taglost') ||
+          final isConnectionDropped =
+              errorStr.contains('taglost') ||
               errorStr.contains('tag lost') ||
               errorStr.contains('transceive') ||
               errorStr.contains('io exception') ||
@@ -1299,104 +1412,95 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // Build an OTA packet with header and optional payload
-  Uint8List _buildOtaPacket({
-    required int type,
-    required int seq,
-    required int arg0,
-    Uint8List? payload,
-  }) {
-    payload ??= Uint8List(0);
-    final buffer = ByteData(NFC_OTA_HEADER_LEN + payload.length);
-    buffer.setUint32(0, NFC_OTA_MAGIC, Endian.little); // magic
-    buffer.setUint8(4, NFC_OTA_VERSION); // version
-    buffer.setUint8(5, type); // type
-    buffer.setUint16(6, seq, Endian.little); // seq
-    buffer.setUint32(8, arg0, Endian.little); // arg0
-    buffer.setUint16(12, payload.length, Endian.little); // dataLen
-    buffer.setUint16(14, 0, Endian.little); // reserved
-
-    final result = Uint8List(NFC_OTA_HEADER_LEN + payload.length);
-    result.setAll(0, buffer.buffer.asUint8List());
-    result.setAll(NFC_OTA_HEADER_LEN, payload);
-
-    return result;
+  // CRC32 calculation for OTA chunks
+  int _calculateCrc32(Uint8List data) {
+    const int polynomial = 0xEDB88320;
+    int crc = 0xFFFFFFFF;
+    for (int byte in data) {
+      crc ^= byte;
+      for (int i = 0; i < 8; i++) {
+        if ((crc & 1) != 0) {
+          crc = (crc >> 1) ^ polynomial;
+        } else {
+          crc >>= 1;
+        }
+      }
+    }
+    return crc ^ 0xFFFFFFFF;
   }
 
-  // Upload firmware to microcontroller via NFC mailbox
+  // Upload firmware to microcontroller via NFC EEPROM
   Future<void> _uploadFirmware() async {
-    // Step 1: Pick the JSON and stream files
+    // Step 1: Fetch firmware metadata and binary from web server
+    // Files on server: firmware.bin.nfc_ota.json (metadata) and firmware.bin.nfc_ota.stream (binary)
     setState(() {
-      _nfcStatus = 'Select firmware files...';
-      _progressDetail = 'Opening file picker...';
+      _nfcStatus = 'Checking for firmware updates...';
+      _progressDetail = 'Connecting to server...';
     });
 
-    // Pick the JSON manifest file
-    final jsonResult = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['json'],
-      dialogTitle: 'Select firmware JSON manifest (*.nfc_ota.json)',
-    );
+    Uint8List? firmwareBytes;
+    int firmwareSize = 0;
+    String? firmwareVersion;
 
-    if (jsonResult == null || jsonResult.files.isEmpty) {
-      setState(() {
-        _nfcStatus = 'Firmware upload cancelled.';
-        _progressDetail = null;
-      });
-      return;
-    }
-
-    final jsonPath = jsonResult.files.single.path;
-    if (jsonPath == null) {
-      setState(() {
-        _nfcStatus = 'Error: Could not access JSON file.';
-        _progressDetail = null;
-      });
-      return;
-    }
-
-    // Derive the stream file path from the JSON path
-    // JSON file: firmware.bin.nfc_ota.json -> Stream file: firmware.bin.nfc_ota.stream
-    final streamPath = jsonPath.replaceAll('.json', '.stream');
-    final streamFile = File(streamPath);
-
-    if (!await streamFile.exists()) {
-      setState(() {
-        _nfcStatus = 'Error: Stream file not found at $streamPath';
-        _progressDetail = null;
-      });
-      return;
-    }
-
-    // Parse JSON manifest
-    final jsonFile = File(jsonPath);
-    final jsonContent = await jsonFile.readAsString();
-    final Map<String, dynamic> manifest;
     try {
-      manifest = jsonDecode(jsonContent) as Map<String, dynamic>;
+      // First, fetch metadata to get firmware info
+      setState(() {
+        _progressDetail = 'Fetching firmware metadata...';
+      });
+      final metaUrl = '$FIRMWARE_BASE_URL/firmware.bin.nfc_ota.json';
+      final metaResponse = await http
+          .get(Uri.parse(metaUrl))
+          .timeout(const Duration(seconds: 10));
+
+      if (metaResponse.statusCode == 200) {
+        final meta = jsonDecode(metaResponse.body) as Map<String, dynamic>;
+        firmwareVersion = meta['version'] as String?;
+        print('[FW] Metadata: $meta');
+      } else {
+        print('[FW] Metadata not found (HTTP ${metaResponse.statusCode}), continuing without version info');
+      }
+    } catch (e) {
+      print('[FW] Failed to fetch metadata: $e, continuing without version info');
+    }
+
+    // Fetch the firmware binary
+    setState(() {
+      _progressDetail = 'Downloading firmware...';
+    });
+
+    try {
+      final firmwareUrl = '$FIRMWARE_BASE_URL/firmware.bin.nfc_ota.stream';
+      final firmwareResponse = await http
+          .get(Uri.parse(firmwareUrl))
+          .timeout(const Duration(seconds: 60));
+
+      if (firmwareResponse.statusCode != 200) {
+        throw Exception(
+          'Failed to download firmware (HTTP ${firmwareResponse.statusCode})',
+        );
+      }
+
+      firmwareBytes = firmwareResponse.bodyBytes;
+      firmwareSize = firmwareBytes.length;
     } catch (e) {
       setState(() {
-        _nfcStatus = 'Error: Invalid JSON manifest: $e';
+        _nfcStatus = 'Error: Could not download firmware: $e';
         _progressDetail = null;
       });
       return;
     }
 
-    final int firmwareSize = manifest['size_bytes'] ?? 0;
-    final String crc32Str = manifest['crc32'] ?? '0x0';
-    final int expectedCrc32 = int.parse(crc32Str.replaceFirst('0x', ''), radix: 16);
-    final int dataPackets = manifest['data_packets'] ?? 0;
-
-    if (firmwareSize == 0 || dataPackets == 0) {
+    if (firmwareSize == 0) {
       setState(() {
-        _nfcStatus = 'Error: Invalid firmware manifest (size=0 or no packets).';
+        _nfcStatus = 'Error: Downloaded firmware is empty.';
         _progressDetail = null;
       });
       return;
     }
 
-    // Read stream file
-    final streamBytes = await streamFile.readAsBytes();
+    // Calculate CRC32 of firmware
+    final firmwareCrc = _calculateCrc32(firmwareBytes);
+    final totalChunks = (firmwareSize / NFC_OTA_MAX_CHUNK_SIZE).ceil();
 
     // Show confirmation dialog
     final confirm = await showDialog<bool>(
@@ -1404,9 +1508,10 @@ class _MyHomePageState extends State<MyHomePage> {
       builder: (context) => AlertDialog(
         title: const Text('Upload Firmware?'),
         content: Text(
+          '${firmwareVersion != null ? 'Version: $firmwareVersion\n' : ''}'
           'Firmware size: $firmwareSize bytes\n'
-          'Packets: $dataPackets\n'
-          'CRC32: 0x${expectedCrc32.toRadixString(16).toUpperCase()}\n\n'
+          'Chunks: $totalChunks (${NFC_OTA_MAX_CHUNK_SIZE} bytes each)\n'
+          'CRC32: 0x${firmwareCrc.toRadixString(16).toUpperCase()}\n\n'
           'This will update the microcontroller firmware.\n'
           'Keep the phone touching the device until complete.',
         ),
@@ -1433,7 +1538,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
     // Start NFC session for firmware upload
     setState(() {
-      _nfcStatus = 'Starting firmware upload... Touch the ST25DV tag to the phone.';
+      _nfcStatus =
+          'Starting firmware upload... Touch the ST25DV tag to the phone.';
       _scanning = true;
       _progressDetail = 'Waiting for tag...';
     });
@@ -1472,30 +1578,41 @@ class _MyHomePageState extends State<MyHomePage> {
                 errorStr.contains('ioexception');
           }
 
-          // Write to NFC mailbox using Fast Transfer Mode (FTM)
-          // ST25DV mailbox is accessed via special commands
-          Future<void> writeMailbox(Uint8List data) async {
+          // Local helper: read from NFC with retry for temporary disconnects
+          Future<Uint8List> readNFC(int length, int address) async {
             const maxRetries = 100;
             const retryDelayMs = 50;
             for (int attempt = 0; attempt < maxRetries; attempt++) {
               try {
-                // ST25DV Fast Transfer Mode: Write Message command
-                // Command: 0xAA (Write Message), Length, Data
-                // ISO15693 frame: FLAGS(0x22) | CMD(0xAA) | MFG_CODE(0x02 for ST) | UID | MSG_LENGTH | DATA
-                final frame = BytesBuilder();
-                frame.addByte(0x22); // Flags: addressed + high data rate
-                frame.addByte(0xAA); // ST Write Message command
-                frame.addByte(0x02); // ST manufacturer code
-                frame.add(uid);
-                frame.addByte(data.length); // Message length (1 byte, max 255)
-                frame.add(data);
-
-                final response = await vAndroid.transceive(frame.toBytes());
-                if (response.isEmpty || response[0] != 0x00) {
-                  throw Exception(
-                    'Mailbox write failed (resp: ${response.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')})',
-                  );
+                return await _readNfcVAndroid(
+                  vAndroid,
+                  uid,
+                  length: length,
+                  startBlock: address ~/ 4,
+                );
+              } catch (e) {
+                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
+                  await Future.delayed(Duration(milliseconds: retryDelayMs));
+                  continue;
                 }
+                rethrow;
+              }
+            }
+            throw Exception('Read failed after $maxRetries attempts');
+          }
+
+          // Local helper: write to NFC with retry for temporary disconnects
+          Future<void> writeNFC(Uint8List data, int address) async {
+            const maxRetries = 100;
+            const retryDelayMs = 50;
+            for (int attempt = 0; attempt < maxRetries; attempt++) {
+              try {
+                await _writeNfcVAndroid(
+                  vAndroid,
+                  uid,
+                  data,
+                  startBlock: address ~/ 4,
+                );
                 return;
               } catch (e) {
                 if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
@@ -1505,125 +1622,147 @@ class _MyHomePageState extends State<MyHomePage> {
                 rethrow;
               }
             }
-            throw Exception('Mailbox write failed after $maxRetries attempts');
+            throw Exception('Write failed after $maxRetries attempts');
           }
 
-          // Read mailbox to check if ESP32 has consumed the message
-          Future<Uint8List?> readMailbox() async {
-            const maxRetries = 50;
-            const retryDelayMs = 50;
-            for (int attempt = 0; attempt < maxRetries; attempt++) {
-              try {
-                // ST25DV Fast Transfer Mode: Read Message Length command
-                // Command: 0xAC (Read Message Length)
-                final lenFrame = BytesBuilder();
-                lenFrame.addByte(0x22); // Flags: addressed + high data rate
-                lenFrame.addByte(0xAC); // ST Read Message Length command
-                lenFrame.addByte(0x02); // ST manufacturer code
-                lenFrame.add(uid);
+          // Split firmware into chunks and upload via EEPROM protocol
+          final totalChunks = (firmwareBytes!.length / NFC_OTA_MAX_CHUNK_SIZE)
+              .ceil();
 
-                final lenResp = await vAndroid.transceive(lenFrame.toBytes());
-                if (lenResp.isEmpty || lenResp[0] != 0x00) {
-                  return null; // No message or error
-                }
-                if (lenResp.length < 2) return null;
-                final msgLen = lenResp[1];
-                if (msgLen == 0) return Uint8List(0); // Empty mailbox
+          setState(() {
+            _progressDetail = 'Sending OTA START command...';
+          });
 
-                // Read the actual message
-                // Command: 0xAB (Read Message), offset, length
-                final readFrame = BytesBuilder();
-                readFrame.addByte(0x22); // Flags
-                readFrame.addByte(0xAB); // ST Read Message command
-                readFrame.addByte(0x02); // ST manufacturer code
-                readFrame.add(uid);
-                readFrame.addByte(0); // Offset
-                readFrame.addByte(msgLen); // Length to read
+          // Step 1: Send OTA START command with total firmware size
+          await writeNFC(
+            Uint8List.fromList(_le32(firmwareBytes!.length)),
+            NFC_OTA_TOTAL_SIZE_ADDR,
+          );
+          await writeNFC(Uint8List.fromList(_le32(0)), NFC_OTA_CHUNK_NUM_ADDR);
+          await writeNFC(
+            Uint8List.fromList(_le32(NFC_OTA_CMD_START)),
+            NFC_OTA_CMD_ADDR,
+          );
 
-                final readResp = await vAndroid.transceive(readFrame.toBytes());
-                if (readResp.isEmpty || readResp[0] != 0x00) {
-                  return null;
-                }
-                return Uint8List.fromList(readResp.sublist(1));
-              } catch (e) {
-                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
-                  await Future.delayed(Duration(milliseconds: retryDelayMs));
-                  continue;
-                }
-                rethrow;
-              }
+          // Wait for ESP32 to acknowledge start
+          int status = 0;
+          for (int poll = 0; poll < 100; poll++) {
+            await Future.delayed(const Duration(milliseconds: 100));
+            final statusBytes = await readNFC(4, NFC_OTA_STATUS_ADDR);
+            status = _u32le(statusBytes);
+            if (status == NFC_OTA_STATUS_READY) break;
+            if (status == NFC_OTA_STATUS_ERROR) {
+              throw Exception('ESP32 rejected OTA start command');
             }
-            return null;
           }
-
-          // Wait for mailbox to be empty (ESP32 consumed the message)
-          Future<bool> waitForMailboxEmpty({int timeoutMs = 5000}) async {
-            final stopwatch = Stopwatch()..start();
-            while (stopwatch.elapsedMilliseconds < timeoutMs) {
-              final msg = await readMailbox();
-              if (msg == null || msg.isEmpty) {
-                return true;
-              }
-              await Future.delayed(const Duration(milliseconds: 50));
-            }
-            return false;
-          }
-
-          // Parse the stream file and send packets
-          int offset = 0;
-          int packetsSent = 0;
-          final totalPackets = dataPackets + 2; // START + DATA packets + END
-
-          while (offset < streamBytes.length) {
-            // Read frame length (2 bytes, little-endian)
-            if (offset + 2 > streamBytes.length) break;
-            final frameLen = streamBytes[offset] | (streamBytes[offset + 1] << 8);
-            offset += 2;
-
-            if (offset + frameLen > streamBytes.length) {
-              throw Exception('Malformed stream file: frame extends beyond file');
-            }
-
-            // Extract the frame
-            final frame = Uint8List.fromList(
-              streamBytes.sublist(offset, offset + frameLen),
+          if (status != NFC_OTA_STATUS_READY) {
+            throw Exception(
+              'Timeout waiting for ESP32 to acknowledge OTA start',
             );
-            offset += frameLen;
+          }
 
-            packetsSent++;
-            final progress = (packetsSent / totalPackets * 100).toStringAsFixed(1);
+          // Step 2: Send firmware chunks
+          for (int chunkNum = 0; chunkNum < totalChunks; chunkNum++) {
+            final chunkStart = chunkNum * NFC_OTA_MAX_CHUNK_SIZE;
+            final chunkEnd = (chunkStart + NFC_OTA_MAX_CHUNK_SIZE).clamp(
+              0,
+              firmwareBytes!.length,
+            );
+            final chunkData = firmwareBytes!.sublist(chunkStart, chunkEnd);
+            final chunkCrc = _calculateCrc32(Uint8List.fromList(chunkData));
 
-            // Determine packet type for display
-            String packetType = 'DATA';
-            if (frame.length >= 6) {
-              final type = frame[5];
-              if (type == NFC_OTA_MSG_START) packetType = 'START';
-              else if (type == NFC_OTA_MSG_END) packetType = 'END';
-              else if (type == NFC_OTA_MSG_ABORT) packetType = 'ABORT';
-            }
-
+            final progress = ((chunkNum + 1) / totalChunks * 100)
+                .toStringAsFixed(1);
             setState(() {
-              _progressDetail = 'Sending $packetType packet $packetsSent/$totalPackets ($progress%)...';
+              _progressDetail =
+                  'Uploading chunk ${chunkNum + 1}/$totalChunks ($progress%)...';
             });
 
-            // Wait for mailbox to be empty before sending
-            final mailboxReady = await waitForMailboxEmpty(timeoutMs: 10000);
-            if (!mailboxReady) {
-              throw Exception('Timeout waiting for ESP32 to process previous packet');
+            // Write chunk metadata
+            await writeNFC(
+              Uint8List.fromList(_le32(chunkNum)),
+              NFC_OTA_CHUNK_NUM_ADDR,
+            );
+            await writeNFC(
+              Uint8List.fromList(_le32(chunkData.length)),
+              NFC_OTA_CHUNK_SIZE_ADDR,
+            );
+            await writeNFC(
+              Uint8List.fromList(_le32(chunkCrc)),
+              NFC_OTA_CRC32_ADDR,
+            );
+
+            // Write chunk data block by block with progress
+            final chunkBytes = Uint8List.fromList(chunkData);
+            final totalBlocks = (chunkBytes.length + 3) ~/ 4;
+            for (int blockIdx = 0; blockIdx < totalBlocks; blockIdx++) {
+              final blockAddr = NFC_OTA_DATA_ADDR + (blockIdx * 4);
+              final byteOffset = blockIdx * 4;
+              final block = Uint8List(4);
+              for (int j = 0; j < 4; j++) {
+                final idx = byteOffset + j;
+                block[j] = idx < chunkBytes.length ? chunkBytes[idx] : 0;
+              }
+              
+              // Update progress every 10 blocks to avoid too frequent UI updates
+              if (blockIdx % 10 == 0 || blockIdx == totalBlocks - 1) {
+                final blockProgress = ((blockIdx + 1) / totalBlocks * 100).toStringAsFixed(0);
+                setState(() {
+                  _progressDetail =
+                      'Chunk ${chunkNum + 1}/$totalChunks: Writing block ${blockIdx + 1}/$totalBlocks '
+                      '(addr 0x${blockAddr.toRadixString(16)}) - $blockProgress%';
+                });
+              }
+              
+              await writeNFC(block, blockAddr);
             }
 
-            // Send the frame to mailbox
-            await writeMailbox(frame);
+            // Signal that data is ready
+            await writeNFC(
+              Uint8List.fromList(_le32(NFC_OTA_CMD_DATA)),
+              NFC_OTA_CMD_ADDR,
+            );
 
-            // Small delay between packets
-            await Future.delayed(const Duration(milliseconds: 10));
+            // Wait for ESP32 to process chunk
+            status = 0;
+            for (int poll = 0; poll < 200; poll++) {
+              await Future.delayed(const Duration(milliseconds: 100));
+              final statusBytes = await readNFC(4, NFC_OTA_STATUS_ADDR);
+              status = _u32le(statusBytes);
+              if (status == NFC_OTA_STATUS_READY) break;
+              if (status == NFC_OTA_STATUS_ERROR) {
+                throw Exception(
+                  'ESP32 reported error processing chunk $chunkNum',
+                );
+              }
+            }
+            if (status != NFC_OTA_STATUS_READY) {
+              throw Exception(
+                'Timeout waiting for ESP32 to process chunk $chunkNum',
+              );
+            }
           }
 
-          // Wait for final processing
+          // Step 3: Send OTA END command
           setState(() {
-            _progressDetail = 'Waiting for ESP32 to finalize update...';
+            _progressDetail = 'Finalizing firmware upload...';
           });
-          await Future.delayed(const Duration(seconds: 2));
+          await writeNFC(
+            Uint8List.fromList(_le32(NFC_OTA_CMD_END)),
+            NFC_OTA_CMD_ADDR,
+          );
+
+          // Wait for final status
+          status = 0;
+          for (int poll = 0; poll < 100; poll++) {
+            await Future.delayed(const Duration(milliseconds: 100));
+            final statusBytes = await readNFC(4, NFC_OTA_STATUS_ADDR);
+            status = _u32le(statusBytes);
+            if (status == NFC_OTA_STATUS_DONE) break;
+            if (status == NFC_OTA_STATUS_ERROR) {
+              throw Exception('ESP32 reported error during finalization');
+            }
+          }
 
           setState(() {
             _nfcStatus = 'Firmware upload complete! Device will reboot.';
@@ -1640,8 +1779,8 @@ class _MyHomePageState extends State<MyHomePage> {
               builder: (context) => AlertDialog(
                 title: const Text('Firmware Upload Complete'),
                 content: Text(
-                  'Successfully sent $packetsSent packets.\n'
-                  'Firmware size: $firmwareSize bytes.\n\n'
+                  'Successfully sent $totalChunks chunks.\n'
+                  'Firmware size: ${firmwareBytes!.length} bytes.\n\n'
                   'The device will now reboot to apply the update.',
                 ),
                 actions: [
@@ -1656,7 +1795,8 @@ class _MyHomePageState extends State<MyHomePage> {
         } catch (e) {
           // Check if this is a connection dropped error
           final errorStr = e.toString().toLowerCase();
-          final isConnectionDropped = errorStr.contains('taglost') ||
+          final isConnectionDropped =
+              errorStr.contains('taglost') ||
               errorStr.contains('tag lost') ||
               errorStr.contains('transceive') ||
               errorStr.contains('io exception') ||
@@ -1666,7 +1806,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
           setState(() {
             if (isConnectionDropped) {
-              _nfcStatus = 'NFC connection lost during firmware upload. Please try again.';
+              _nfcStatus =
+                  'NFC connection lost during firmware upload. Please try again.';
             } else {
               _nfcStatus = 'Firmware upload error: $e';
             }
@@ -1963,7 +2104,9 @@ class _MyHomePageState extends State<MyHomePage> {
             ElevatedButton.icon(
               onPressed: _scanning ? _stopScanning : _connectToSensor,
               icon: Icon(_scanning ? Icons.stop : Icons.sync),
-              label: Text(_scanning ? 'Stop scanning' : 'Update Sensor Settings'),
+              label: Text(
+                _scanning ? 'Stop scanning' : 'Update Sensor Settings',
+              ),
             ),
             const SizedBox(height: 12),
             ElevatedButton.icon(
@@ -1977,7 +2120,8 @@ class _MyHomePageState extends State<MyHomePage> {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => ShowDataPage(sensorData: _sensorDataStore),
+                    builder: (context) =>
+                        ShowDataPage(sensorData: _sensorDataStore),
                   ),
                 );
               },
