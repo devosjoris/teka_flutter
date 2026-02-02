@@ -4,8 +4,10 @@ import 'package:nfc_manager/nfc_manager_android.dart' as android;
 import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:async';
+import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'package:file_picker/file_picker.dart';
 
 void main() {
   runApp(const MyApp());
@@ -341,6 +343,18 @@ class _MyHomePageState extends State<MyHomePage> {
   static const int NFC_DT_STATUS_NO_DATA = 0x4E444154; // 'NDAT' - No new data
   static const int NFC_DT_STATUS_ERROR = 0x45525221; // 'ERR!' - Error
   static const int NFC_DT_STATUS_BUSY = 0x42555359; // 'BUSY' - Processing
+
+  // NFC OTA Protocol constants (for firmware updates via mailbox)
+  static const int NFC_OTA_MAGIC = 0x544F464E; // 'NFOT' little-endian
+  static const int NFC_OTA_VERSION = 1;
+  static const int NFC_OTA_MSG_START = 1; // Start OTA transfer
+  static const int NFC_OTA_MSG_DATA = 2; // Data chunk
+  static const int NFC_OTA_MSG_END = 3; // End transfer
+  static const int NFC_OTA_MSG_ABORT = 4; // Abort transfer
+  static const int NFC_OTA_MAX_MAILBOX_LEN = 255;
+  static const int NFC_OTA_HEADER_LEN = 16;
+  static const int NFC_OTA_MAX_PAYLOAD_LEN = 239; // 255 - 16
+  static const int NFC_OTA_CHUNK_SIZE = 200; // Recommended chunk size
 
   // Sensor log entries read from device
   List<SensorLogEntry> _sensorLogEntries = [];
@@ -1285,6 +1299,394 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
+  // Build an OTA packet with header and optional payload
+  Uint8List _buildOtaPacket({
+    required int type,
+    required int seq,
+    required int arg0,
+    Uint8List? payload,
+  }) {
+    payload ??= Uint8List(0);
+    final buffer = ByteData(NFC_OTA_HEADER_LEN + payload.length);
+    buffer.setUint32(0, NFC_OTA_MAGIC, Endian.little); // magic
+    buffer.setUint8(4, NFC_OTA_VERSION); // version
+    buffer.setUint8(5, type); // type
+    buffer.setUint16(6, seq, Endian.little); // seq
+    buffer.setUint32(8, arg0, Endian.little); // arg0
+    buffer.setUint16(12, payload.length, Endian.little); // dataLen
+    buffer.setUint16(14, 0, Endian.little); // reserved
+
+    final result = Uint8List(NFC_OTA_HEADER_LEN + payload.length);
+    result.setAll(0, buffer.buffer.asUint8List());
+    result.setAll(NFC_OTA_HEADER_LEN, payload);
+
+    return result;
+  }
+
+  // Upload firmware to microcontroller via NFC mailbox
+  Future<void> _uploadFirmware() async {
+    // Step 1: Pick the JSON and stream files
+    setState(() {
+      _nfcStatus = 'Select firmware files...';
+      _progressDetail = 'Opening file picker...';
+    });
+
+    // Pick the JSON manifest file
+    final jsonResult = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['json'],
+      dialogTitle: 'Select firmware JSON manifest (*.nfc_ota.json)',
+    );
+
+    if (jsonResult == null || jsonResult.files.isEmpty) {
+      setState(() {
+        _nfcStatus = 'Firmware upload cancelled.';
+        _progressDetail = null;
+      });
+      return;
+    }
+
+    final jsonPath = jsonResult.files.single.path;
+    if (jsonPath == null) {
+      setState(() {
+        _nfcStatus = 'Error: Could not access JSON file.';
+        _progressDetail = null;
+      });
+      return;
+    }
+
+    // Derive the stream file path from the JSON path
+    // JSON file: firmware.bin.nfc_ota.json -> Stream file: firmware.bin.nfc_ota.stream
+    final streamPath = jsonPath.replaceAll('.json', '.stream');
+    final streamFile = File(streamPath);
+
+    if (!await streamFile.exists()) {
+      setState(() {
+        _nfcStatus = 'Error: Stream file not found at $streamPath';
+        _progressDetail = null;
+      });
+      return;
+    }
+
+    // Parse JSON manifest
+    final jsonFile = File(jsonPath);
+    final jsonContent = await jsonFile.readAsString();
+    final Map<String, dynamic> manifest;
+    try {
+      manifest = jsonDecode(jsonContent) as Map<String, dynamic>;
+    } catch (e) {
+      setState(() {
+        _nfcStatus = 'Error: Invalid JSON manifest: $e';
+        _progressDetail = null;
+      });
+      return;
+    }
+
+    final int firmwareSize = manifest['size_bytes'] ?? 0;
+    final String crc32Str = manifest['crc32'] ?? '0x0';
+    final int expectedCrc32 = int.parse(crc32Str.replaceFirst('0x', ''), radix: 16);
+    final int dataPackets = manifest['data_packets'] ?? 0;
+
+    if (firmwareSize == 0 || dataPackets == 0) {
+      setState(() {
+        _nfcStatus = 'Error: Invalid firmware manifest (size=0 or no packets).';
+        _progressDetail = null;
+      });
+      return;
+    }
+
+    // Read stream file
+    final streamBytes = await streamFile.readAsBytes();
+
+    // Show confirmation dialog
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Upload Firmware?'),
+        content: Text(
+          'Firmware size: $firmwareSize bytes\n'
+          'Packets: $dataPackets\n'
+          'CRC32: 0x${expectedCrc32.toRadixString(16).toUpperCase()}\n\n'
+          'This will update the microcontroller firmware.\n'
+          'Keep the phone touching the device until complete.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Upload'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) {
+      setState(() {
+        _nfcStatus = 'Firmware upload cancelled.';
+        _progressDetail = null;
+      });
+      return;
+    }
+
+    // Start NFC session for firmware upload
+    setState(() {
+      _nfcStatus = 'Starting firmware upload... Touch the ST25DV tag to the phone.';
+      _scanning = true;
+      _progressDetail = 'Waiting for tag...';
+    });
+    _disconnectTimer?.cancel();
+    _disconnectTimer = null;
+
+    final isAvailable = await nfc.NfcManager.instance.isAvailable();
+    if (!isAvailable) {
+      setState(() {
+        _nfcStatus = 'NFC is not available on this device.';
+        _scanning = false;
+        _progressDetail = null;
+      });
+      return;
+    }
+
+    nfc.NfcManager.instance.startSession(
+      pollingOptions: {nfc.NfcPollingOption.iso15693},
+      onDiscovered: (nfc.NfcTag tag) async {
+        try {
+          final vAndroid = android.NfcVAndroid.from(tag);
+          if (vAndroid == null) {
+            throw Exception(
+              'ISO15693 (NFC-V) not available; cannot perform OTA update.',
+            );
+          }
+          final uid = vAndroid.tag.id;
+
+          // Helper to check if error is a temporary NFC disconnect
+          bool isTemporaryDisconnect(dynamic e) {
+            final errorStr = e.toString().toLowerCase();
+            return errorStr.contains('taglost') ||
+                errorStr.contains('tag lost') ||
+                errorStr.contains('transceive') ||
+                errorStr.contains('io exception') ||
+                errorStr.contains('ioexception');
+          }
+
+          // Write to NFC mailbox using Fast Transfer Mode (FTM)
+          // ST25DV mailbox is accessed via special commands
+          Future<void> writeMailbox(Uint8List data) async {
+            const maxRetries = 100;
+            const retryDelayMs = 50;
+            for (int attempt = 0; attempt < maxRetries; attempt++) {
+              try {
+                // ST25DV Fast Transfer Mode: Write Message command
+                // Command: 0xAA (Write Message), Length, Data
+                // ISO15693 frame: FLAGS(0x22) | CMD(0xAA) | MFG_CODE(0x02 for ST) | UID | MSG_LENGTH | DATA
+                final frame = BytesBuilder();
+                frame.addByte(0x22); // Flags: addressed + high data rate
+                frame.addByte(0xAA); // ST Write Message command
+                frame.addByte(0x02); // ST manufacturer code
+                frame.add(uid);
+                frame.addByte(data.length); // Message length (1 byte, max 255)
+                frame.add(data);
+
+                final response = await vAndroid.transceive(frame.toBytes());
+                if (response.isEmpty || response[0] != 0x00) {
+                  throw Exception(
+                    'Mailbox write failed (resp: ${response.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')})',
+                  );
+                }
+                return;
+              } catch (e) {
+                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
+                  await Future.delayed(Duration(milliseconds: retryDelayMs));
+                  continue;
+                }
+                rethrow;
+              }
+            }
+            throw Exception('Mailbox write failed after $maxRetries attempts');
+          }
+
+          // Read mailbox to check if ESP32 has consumed the message
+          Future<Uint8List?> readMailbox() async {
+            const maxRetries = 50;
+            const retryDelayMs = 50;
+            for (int attempt = 0; attempt < maxRetries; attempt++) {
+              try {
+                // ST25DV Fast Transfer Mode: Read Message Length command
+                // Command: 0xAC (Read Message Length)
+                final lenFrame = BytesBuilder();
+                lenFrame.addByte(0x22); // Flags: addressed + high data rate
+                lenFrame.addByte(0xAC); // ST Read Message Length command
+                lenFrame.addByte(0x02); // ST manufacturer code
+                lenFrame.add(uid);
+
+                final lenResp = await vAndroid.transceive(lenFrame.toBytes());
+                if (lenResp.isEmpty || lenResp[0] != 0x00) {
+                  return null; // No message or error
+                }
+                if (lenResp.length < 2) return null;
+                final msgLen = lenResp[1];
+                if (msgLen == 0) return Uint8List(0); // Empty mailbox
+
+                // Read the actual message
+                // Command: 0xAB (Read Message), offset, length
+                final readFrame = BytesBuilder();
+                readFrame.addByte(0x22); // Flags
+                readFrame.addByte(0xAB); // ST Read Message command
+                readFrame.addByte(0x02); // ST manufacturer code
+                readFrame.add(uid);
+                readFrame.addByte(0); // Offset
+                readFrame.addByte(msgLen); // Length to read
+
+                final readResp = await vAndroid.transceive(readFrame.toBytes());
+                if (readResp.isEmpty || readResp[0] != 0x00) {
+                  return null;
+                }
+                return Uint8List.fromList(readResp.sublist(1));
+              } catch (e) {
+                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
+                  await Future.delayed(Duration(milliseconds: retryDelayMs));
+                  continue;
+                }
+                rethrow;
+              }
+            }
+            return null;
+          }
+
+          // Wait for mailbox to be empty (ESP32 consumed the message)
+          Future<bool> waitForMailboxEmpty({int timeoutMs = 5000}) async {
+            final stopwatch = Stopwatch()..start();
+            while (stopwatch.elapsedMilliseconds < timeoutMs) {
+              final msg = await readMailbox();
+              if (msg == null || msg.isEmpty) {
+                return true;
+              }
+              await Future.delayed(const Duration(milliseconds: 50));
+            }
+            return false;
+          }
+
+          // Parse the stream file and send packets
+          int offset = 0;
+          int packetsSent = 0;
+          final totalPackets = dataPackets + 2; // START + DATA packets + END
+
+          while (offset < streamBytes.length) {
+            // Read frame length (2 bytes, little-endian)
+            if (offset + 2 > streamBytes.length) break;
+            final frameLen = streamBytes[offset] | (streamBytes[offset + 1] << 8);
+            offset += 2;
+
+            if (offset + frameLen > streamBytes.length) {
+              throw Exception('Malformed stream file: frame extends beyond file');
+            }
+
+            // Extract the frame
+            final frame = Uint8List.fromList(
+              streamBytes.sublist(offset, offset + frameLen),
+            );
+            offset += frameLen;
+
+            packetsSent++;
+            final progress = (packetsSent / totalPackets * 100).toStringAsFixed(1);
+
+            // Determine packet type for display
+            String packetType = 'DATA';
+            if (frame.length >= 6) {
+              final type = frame[5];
+              if (type == NFC_OTA_MSG_START) packetType = 'START';
+              else if (type == NFC_OTA_MSG_END) packetType = 'END';
+              else if (type == NFC_OTA_MSG_ABORT) packetType = 'ABORT';
+            }
+
+            setState(() {
+              _progressDetail = 'Sending $packetType packet $packetsSent/$totalPackets ($progress%)...';
+            });
+
+            // Wait for mailbox to be empty before sending
+            final mailboxReady = await waitForMailboxEmpty(timeoutMs: 10000);
+            if (!mailboxReady) {
+              throw Exception('Timeout waiting for ESP32 to process previous packet');
+            }
+
+            // Send the frame to mailbox
+            await writeMailbox(frame);
+
+            // Small delay between packets
+            await Future.delayed(const Duration(milliseconds: 10));
+          }
+
+          // Wait for final processing
+          setState(() {
+            _progressDetail = 'Waiting for ESP32 to finalize update...';
+          });
+          await Future.delayed(const Duration(seconds: 2));
+
+          setState(() {
+            _nfcStatus = 'Firmware upload complete! Device will reboot.';
+            _scanning = false;
+            _progressDetail = null;
+          });
+
+          await nfc.NfcManager.instance.stopSession();
+
+          // Show success dialog
+          if (mounted) {
+            showDialog(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Firmware Upload Complete'),
+                content: Text(
+                  'Successfully sent $packetsSent packets.\n'
+                  'Firmware size: $firmwareSize bytes.\n\n'
+                  'The device will now reboot to apply the update.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+            );
+          }
+        } catch (e) {
+          // Check if this is a connection dropped error
+          final errorStr = e.toString().toLowerCase();
+          final isConnectionDropped = errorStr.contains('taglost') ||
+              errorStr.contains('tag lost') ||
+              errorStr.contains('transceive') ||
+              errorStr.contains('io exception') ||
+              errorStr.contains('ioexception') ||
+              errorStr.contains('connection') ||
+              errorStr.contains('removed');
+
+          setState(() {
+            if (isConnectionDropped) {
+              _nfcStatus = 'NFC connection lost during firmware upload. Please try again.';
+            } else {
+              _nfcStatus = 'Firmware upload error: $e';
+            }
+          });
+          _disconnectTimer?.cancel();
+          _disconnectTimer = Timer(const Duration(seconds: 3), () async {
+            if (!mounted) return;
+            setState(() {
+              _scanning = false;
+              _progressDetail = null;
+            });
+            try {
+              await nfc.NfcManager.instance.stopSession();
+            } catch (_) {}
+          });
+        }
+      },
+    );
+  }
+
   // Show dialog with sensor data
   void _showSensorDataDialog() {
     showDialog(
@@ -1581,6 +1983,12 @@ class _MyHomePageState extends State<MyHomePage> {
               },
               icon: const Icon(Icons.show_chart),
               label: Text('Show Data (${_sensorDataStore.length} points)'),
+            ),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              onPressed: _scanning ? null : _uploadFirmware,
+              icon: const Icon(Icons.system_update),
+              label: const Text('Upload New Firmware'),
             ),
             if (_sensorLogEntries.isNotEmpty) ...[
               const SizedBox(height: 12),
