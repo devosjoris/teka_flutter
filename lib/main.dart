@@ -1414,26 +1414,10 @@ class _MyHomePageState extends State<MyHomePage> {
 
     Uint8List? firmwareBytes;
     int firmwareSize = 0;
-    String? firmwareVersion;
-
-    try {
-      setState(() => _progressDetail = 'Fetching firmware metadata...');
-      final metaUrl = '$FIRMWARE_BASE_URL/firmware.bin.gz.nfc_ota.json';
-      final metaResponse = await http
-          .get(Uri.parse(metaUrl))
-          .timeout(const Duration(seconds: 10));
-      if (metaResponse.statusCode == 200) {
-        final meta = jsonDecode(metaResponse.body) as Map<String, dynamic>;
-        firmwareVersion = meta['version'] as String?;
-        print('[FW] Metadata: $meta');
-      }
-    } catch (e) {
-      print('[FW] Failed to fetch metadata: $e');
-    }
 
     setState(() => _progressDetail = 'Downloading firmware...');
     try {
-      final firmwareUrl = '$FIRMWARE_BASE_URL/firmware.bin.gz.nfc_ota.stream';
+      final firmwareUrl = '$FIRMWARE_BASE_URL/firmware.bin';
       final firmwareResponse = await http
           .get(Uri.parse(firmwareUrl))
           .timeout(const Duration(seconds: 60));
@@ -1466,7 +1450,6 @@ class _MyHomePageState extends State<MyHomePage> {
       builder: (ctx) => AlertDialog(
         title: const Text('Upload Firmware?'),
         content: Text(
-          '${firmwareVersion != null ? 'Version: $firmwareVersion\n' : ''}'
           'Size: $firmwareSize bytes\n'
           'CRC32: 0x${firmwareCrc.toRadixString(16).toUpperCase()}\n\n'
           'The update has 3 steps:\n'
@@ -1649,6 +1632,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
         // Subscribe to control notifications for status updates
         await controlChar.setNotifyValue(true);
+        // Allow CCCD write to fully settle before sending commands
+        await Future.delayed(const Duration(milliseconds: 500));
         final statusStream = controlChar.onValueReceived;
 
         // Send START command: [0x01, size_LE_4bytes]
@@ -1660,6 +1645,7 @@ class _MyHomePageState extends State<MyHomePage> {
         startCmd[3] = (firmwareSize >> 16) & 0xFF;
         startCmd[4] = (firmwareSize >> 24) & 0xFF;
         await controlChar.write(startCmd, withoutResponse: false);
+        print('[BLE OTA] START command sent (${startCmd.length} bytes)');
 
         // Wait for READY
         final readyResponse = await statusStream
@@ -1670,32 +1656,41 @@ class _MyHomePageState extends State<MyHomePage> {
         }
 
         // Send firmware data in MTU-sized chunks (minus 3 bytes for ATT overhead)
+        // Use write-without-response for speed, with periodic sync checkpoints
+        // to ensure the ESP32 doesn't fall behind and drop packets.
         final chunkSize = (mtu - 3).clamp(20, 509);
         final totalChunks = (firmwareSize / chunkSize).ceil();
+        const syncInterval = 100; // sync every 100 chunks
         int bytesSent = 0;
+        print('[BLE OTA] MTU=$mtu, chunkSize=$chunkSize, firmwareSize=$firmwareSize, totalChunks=$totalChunks');
 
         for (int i = 0; i < totalChunks; i++) {
           final start = i * chunkSize;
           final end = (start + chunkSize).clamp(0, firmwareSize);
-          final chunk = firmwareBytes.sublist(start, end);
+          final chunk = Uint8List.sublistView(firmwareBytes, start, end);
 
-          // Write without response for speed
-          await dataChar.write(chunk.toList(), withoutResponse: true);
+          // Pass Uint8List directly — do NOT use .toList() which creates
+          // List<int> (64-bit ints) that may be serialized differently
+          // through the platform channel, causing extra bytes.
+          await dataChar.write(chunk, withoutResponse: true);
           bytesSent += chunk.length;
 
-          final pct = (bytesSent / firmwareSize * 100).toStringAsFixed(1);
-          if (i % 10 == 0 || i == totalChunks - 1) {
+          // Periodic sync: write-with-response on the CONTROL characteristic
+          // (NOT data char) to create a BLE-level barrier without triggering
+          // the ESP32's data onWrite callback.
+          if ((i + 1) % syncInterval == 0 && i < totalChunks - 1) {
+            await controlChar.write([0x00], withoutResponse: false);
+          }
+
+          if (i % 50 == 0 || i == totalChunks - 1) {
+            final pct = (bytesSent / firmwareSize * 100).toStringAsFixed(1);
             setState(() {
               _progressDetail =
                   'Uploading firmware: $pct%\n'
                   '$bytesSent / $firmwareSize bytes\n'
                   'Chunk ${i + 1} / $totalChunks';
             });
-          }
-
-          // Small delay every 20 chunks to avoid BLE congestion
-          if (i % 20 == 19) {
-            await Future.delayed(const Duration(milliseconds: 10));
+            print('[BLE OTA] Chunk ${i + 1}/$totalChunks: sent ${chunk.length}B, total $bytesSent/$firmwareSize ($pct%)');
           }
         }
 
