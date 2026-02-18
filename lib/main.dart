@@ -7,6 +7,7 @@ import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 void main() {
   runApp(const MyApp());
@@ -353,38 +354,29 @@ class _MyHomePageState extends State<MyHomePage> {
   static const int NFC_DT_STATUS_ERROR = 0x45525221; // 'ERR!' - Error
   static const int NFC_DT_STATUS_BUSY = 0x42555359; // 'BUSY' - Processing
 
-  // NFC OTA Protocol constants (EEPROM-based, similar to data transfer)
-  // OTA uses a dedicated memory area in the ST25DV EEPROM
+  // NFC OTA trigger - written to EEPROM to tell ESP32 to enable BLE for OTA
   static const int NFC_OTA_CMD_ADDR = 0x78; // 120 - OTA Command field
-  static const int NFC_OTA_STATUS_ADDR = 0x7C; // 124 - OTA Status field
-  static const int NFC_OTA_CHUNK_NUM_ADDR = 0x80; // 128 - Current chunk number
-  static const int NFC_OTA_TOTAL_SIZE_ADDR = 0x84; // 132 - Total firmware size
-  static const int NFC_OTA_CHUNK_SIZE_ADDR = 0x88; // 136 - Current chunk size
-  static const int NFC_OTA_CRC32_ADDR = 0x8C; // 140 - CRC32 of chunk data
-  static const int NFC_OTA_DATA_ADDR =
-      0xC8; // 200 - OTA data payload start (same as sensor data)
-
-  // OTA Commands (written by app to NFC_OTA_CMD_ADDR)
   static const int NFC_OTA_CMD_NONE = 0x00000000; // No command / idle
-  static const int NFC_OTA_CMD_START =
-      0x4F544153; // 'OTAS' - Start OTA transfer
-  static const int NFC_OTA_CMD_DATA = 0x4F544144; // 'OTAD' - Data chunk ready
-  static const int NFC_OTA_CMD_END = 0x4F544145; // 'OTAE' - End transfer
-  static const int NFC_OTA_CMD_ABORT = 0x4F544158; // 'OTAX' - Abort transfer
+  static const int NFC_OTA_CMD_BLE_ENABLE =
+      0x4F544142; // 'OTAB' - Enable BLE for OTA update
 
-  // OTA Status (written by ESP32 to NFC_OTA_STATUS_ADDR)
-  static const int NFC_OTA_STATUS_IDLE = 0x00000000; // Idle
-  static const int NFC_OTA_STATUS_READY =
-      0x4F545259; // 'OTRY' - Ready for next chunk
-  static const int NFC_OTA_STATUS_BUSY =
-      0x4F544259; // 'OTBY' - Processing chunk
-  static const int NFC_OTA_STATUS_ERROR = 0x4F544552; // 'OTER' - Error occurred
-  static const int NFC_OTA_STATUS_DONE =
-      0x4F54444E; // 'OTDN' - OTA complete, rebooting
+  // BLE OTA Service and Characteristic UUIDs (must match ESP32 firmware)
+  static final Guid BLE_OTA_SERVICE_UUID =
+      Guid('4fafc201-1fb5-459e-8fcc-c5c9c331914b');
+  static final Guid BLE_OTA_CONTROL_CHAR_UUID =
+      Guid('d5875408-fa51-4763-a75d-7d33cecebc31');
+  static final Guid BLE_OTA_DATA_CHAR_UUID =
+      Guid('beb5483e-36e1-4688-b7f5-ea07361b26a8');
 
-  // OTA chunk size (fits in EEPROM data area)
-  static const int NFC_OTA_MAX_CHUNK_SIZE =
-      1800; // Max bytes per chunk (leave room for metadata)
+  // BLE OTA control commands (app -> ESP32)
+  static const int BLE_OTA_CTRL_START = 0x01; // Start OTA (followed by 4-byte LE size)
+  static const int BLE_OTA_CTRL_END = 0x02; // End / verify
+  static const int BLE_OTA_CTRL_ABORT = 0x03; // Abort
+
+  // BLE OTA status notifications (ESP32 -> app)
+  static const int BLE_OTA_STATUS_READY = 0x01;
+  static const int BLE_OTA_STATUS_ERROR = 0x02;
+  static const int BLE_OTA_STATUS_DONE = 0x03;
 
   // Firmware download URL
   static const String FIRMWARE_BASE_URL = 'https://www.devosjoris.be/teka_fw';
@@ -1412,27 +1404,9 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  // CRC32 calculation for OTA chunks
-  int _calculateCrc32(Uint8List data) {
-    const int polynomial = 0xEDB88320;
-    int crc = 0xFFFFFFFF;
-    for (int byte in data) {
-      crc ^= byte;
-      for (int i = 0; i < 8; i++) {
-        if ((crc & 1) != 0) {
-          crc = (crc >> 1) ^ polynomial;
-        } else {
-          crc >>= 1;
-        }
-      }
-    }
-    return crc ^ 0xFFFFFFFF;
-  }
-
-  // Upload firmware to microcontroller via NFC EEPROM
+  // Upload firmware: NFC trigger + BLE transfer
   Future<void> _uploadFirmware() async {
-    // Step 1: Fetch firmware metadata and binary from web server
-    // Files on server: firmware.bin.nfc_ota.json (metadata) and firmware.bin.nfc_ota.stream (binary)
+    // ── Step 1: Download firmware from server ──
     setState(() {
       _nfcStatus = 'Checking for firmware updates...';
       _progressDetail = 'Connecting to server...';
@@ -1443,43 +1417,29 @@ class _MyHomePageState extends State<MyHomePage> {
     String? firmwareVersion;
 
     try {
-      // First, fetch metadata to get firmware info
-      setState(() {
-        _progressDetail = 'Fetching firmware metadata...';
-      });
-      final metaUrl = '$FIRMWARE_BASE_URL/firmware.bin.nfc_ota.json';
+      setState(() => _progressDetail = 'Fetching firmware metadata...');
+      final metaUrl = '$FIRMWARE_BASE_URL/firmware.bin.gz.nfc_ota.json';
       final metaResponse = await http
           .get(Uri.parse(metaUrl))
           .timeout(const Duration(seconds: 10));
-
       if (metaResponse.statusCode == 200) {
         final meta = jsonDecode(metaResponse.body) as Map<String, dynamic>;
         firmwareVersion = meta['version'] as String?;
         print('[FW] Metadata: $meta');
-      } else {
-        print('[FW] Metadata not found (HTTP ${metaResponse.statusCode}), continuing without version info');
       }
     } catch (e) {
-      print('[FW] Failed to fetch metadata: $e, continuing without version info');
+      print('[FW] Failed to fetch metadata: $e');
     }
 
-    // Fetch the firmware binary
-    setState(() {
-      _progressDetail = 'Downloading firmware...';
-    });
-
+    setState(() => _progressDetail = 'Downloading firmware...');
     try {
-      final firmwareUrl = '$FIRMWARE_BASE_URL/firmware.bin.nfc_ota.stream';
+      final firmwareUrl = '$FIRMWARE_BASE_URL/firmware.bin.gz.nfc_ota.stream';
       final firmwareResponse = await http
           .get(Uri.parse(firmwareUrl))
           .timeout(const Duration(seconds: 60));
-
       if (firmwareResponse.statusCode != 200) {
-        throw Exception(
-          'Failed to download firmware (HTTP ${firmwareResponse.statusCode})',
-        );
+        throw Exception('HTTP ${firmwareResponse.statusCode}');
       }
-
       firmwareBytes = firmwareResponse.bodyBytes;
       firmwareSize = firmwareBytes.length;
     } catch (e) {
@@ -1498,36 +1458,34 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
 
-    // Calculate CRC32 of firmware
-    final firmwareCrc = _calculateCrc32(firmwareBytes);
-    final totalChunks = (firmwareSize / NFC_OTA_MAX_CHUNK_SIZE).ceil();
+    final firmwareCrc = _crc32(firmwareBytes);
 
-    // Show confirmation dialog
+    // ── Show confirmation ──
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         title: const Text('Upload Firmware?'),
         content: Text(
           '${firmwareVersion != null ? 'Version: $firmwareVersion\n' : ''}'
-          'Firmware size: $firmwareSize bytes\n'
-          'Chunks: $totalChunks (${NFC_OTA_MAX_CHUNK_SIZE} bytes each)\n'
+          'Size: $firmwareSize bytes\n'
           'CRC32: 0x${firmwareCrc.toRadixString(16).toUpperCase()}\n\n'
-          'This will update the microcontroller firmware.\n'
-          'Keep the phone touching the device until complete.',
+          'The update has 3 steps:\n'
+          '1. Tap NFC tag to trigger BLE mode\n'
+          '2. Wait for device to enable Bluetooth (up to 5 min)\n'
+          '3. Firmware transfers automatically via BLE',
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Upload'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Start Update'),
           ),
         ],
       ),
     );
-
     if (confirm != true) {
       setState(() {
         _nfcStatus = 'Firmware upload cancelled.';
@@ -1536,18 +1494,17 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
 
-    // Start NFC session for firmware upload
+    // ── Step 2: Write NFC_OTA_CMD_BLE_ENABLE via NFC tap ──
     setState(() {
-      _nfcStatus =
-          'Starting firmware upload... Touch the ST25DV tag to the phone.';
+      _nfcStatus = 'Touch the NFC tag to start OTA mode...';
       _scanning = true;
-      _progressDetail = 'Waiting for tag...';
+      _progressDetail = 'Waiting for NFC tag...';
     });
     _disconnectTimer?.cancel();
     _disconnectTimer = null;
 
-    final isAvailable = await nfc.NfcManager.instance.isAvailable();
-    if (!isAvailable) {
+    final nfcAvailable = await nfc.NfcManager.instance.isAvailable();
+    if (!nfcAvailable) {
       setState(() {
         _nfcStatus = 'NFC is not available on this device.';
         _scanning = false;
@@ -1556,276 +1513,250 @@ class _MyHomePageState extends State<MyHomePage> {
       return;
     }
 
+    // Use a completer so we can await the NFC write from the callback
+    final nfcDone = Completer<bool>();
+
     nfc.NfcManager.instance.startSession(
       pollingOptions: {nfc.NfcPollingOption.iso15693},
       onDiscovered: (nfc.NfcTag tag) async {
         try {
           final vAndroid = android.NfcVAndroid.from(tag);
           if (vAndroid == null) {
-            throw Exception(
-              'ISO15693 (NFC-V) not available; cannot perform OTA update.',
-            );
+            throw Exception('ISO15693 (NFC-V) not available.');
           }
           final uid = vAndroid.tag.id;
 
-          // Helper to check if error is a temporary NFC disconnect
-          bool isTemporaryDisconnect(dynamic e) {
-            final errorStr = e.toString().toLowerCase();
-            return errorStr.contains('taglost') ||
-                errorStr.contains('tag lost') ||
-                errorStr.contains('transceive') ||
-                errorStr.contains('io exception') ||
-                errorStr.contains('ioexception');
-          }
-
-          // Local helper: read from NFC with retry for temporary disconnects
-          Future<Uint8List> readNFC(int length, int address) async {
-            const maxRetries = 100;
-            const retryDelayMs = 50;
-            for (int attempt = 0; attempt < maxRetries; attempt++) {
-              try {
-                return await _readNfcVAndroid(
-                  vAndroid,
-                  uid,
-                  length: length,
-                  startBlock: address ~/ 4,
-                );
-              } catch (e) {
-                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
-                  await Future.delayed(Duration(milliseconds: retryDelayMs));
-                  continue;
-                }
-                rethrow;
-              }
-            }
-            throw Exception('Read failed after $maxRetries attempts');
-          }
-
-          // Local helper: write to NFC with retry for temporary disconnects
-          Future<void> writeNFC(Uint8List data, int address) async {
-            const maxRetries = 100;
-            const retryDelayMs = 50;
-            for (int attempt = 0; attempt < maxRetries; attempt++) {
-              try {
-                await _writeNfcVAndroid(
-                  vAndroid,
-                  uid,
-                  data,
-                  startBlock: address ~/ 4,
-                );
-                return;
-              } catch (e) {
-                if (isTemporaryDisconnect(e) && attempt < maxRetries - 1) {
-                  await Future.delayed(Duration(milliseconds: retryDelayMs));
-                  continue;
-                }
-                rethrow;
-              }
-            }
-            throw Exception('Write failed after $maxRetries attempts');
-          }
-
-          // Split firmware into chunks and upload via EEPROM protocol
-          final totalChunks = (firmwareBytes!.length / NFC_OTA_MAX_CHUNK_SIZE)
-              .ceil();
-
-          setState(() {
-            _progressDetail = 'Sending OTA START command...';
-          });
-
-          // Step 1: Send OTA START command with total firmware size
-          await writeNFC(
-            Uint8List.fromList(_le32(firmwareBytes!.length)),
-            NFC_OTA_TOTAL_SIZE_ADDR,
+          setState(() => _progressDetail = 'Writing OTA BLE enable command...');
+          await _writeNfcVAndroid(
+            vAndroid,
+            uid,
+            Uint8List.fromList(_le32(NFC_OTA_CMD_BLE_ENABLE)),
+            startBlock: NFC_OTA_CMD_ADDR ~/ 4,
           );
-          await writeNFC(Uint8List.fromList(_le32(0)), NFC_OTA_CHUNK_NUM_ADDR);
-          await writeNFC(
-            Uint8List.fromList(_le32(NFC_OTA_CMD_START)),
-            NFC_OTA_CMD_ADDR,
-          );
-
-          // Wait for ESP32 to acknowledge start
-          int status = 0;
-          for (int poll = 0; poll < 100; poll++) {
-            await Future.delayed(const Duration(milliseconds: 100));
-            final statusBytes = await readNFC(4, NFC_OTA_STATUS_ADDR);
-            status = _u32le(statusBytes);
-            if (status == NFC_OTA_STATUS_READY) break;
-            if (status == NFC_OTA_STATUS_ERROR) {
-              throw Exception('ESP32 rejected OTA start command');
-            }
-          }
-          if (status != NFC_OTA_STATUS_READY) {
-            throw Exception(
-              'Timeout waiting for ESP32 to acknowledge OTA start',
-            );
-          }
-
-          // Step 2: Send firmware chunks
-          for (int chunkNum = 0; chunkNum < totalChunks; chunkNum++) {
-            final chunkStart = chunkNum * NFC_OTA_MAX_CHUNK_SIZE;
-            final chunkEnd = (chunkStart + NFC_OTA_MAX_CHUNK_SIZE).clamp(
-              0,
-              firmwareBytes!.length,
-            );
-            final chunkData = firmwareBytes!.sublist(chunkStart, chunkEnd);
-            final chunkCrc = _calculateCrc32(Uint8List.fromList(chunkData));
-
-            final progress = ((chunkNum + 1) / totalChunks * 100)
-                .toStringAsFixed(1);
-            setState(() {
-              _progressDetail =
-                  'Uploading chunk ${chunkNum + 1}/$totalChunks ($progress%)...';
-            });
-
-            // Write chunk metadata
-            await writeNFC(
-              Uint8List.fromList(_le32(chunkNum)),
-              NFC_OTA_CHUNK_NUM_ADDR,
-            );
-            await writeNFC(
-              Uint8List.fromList(_le32(chunkData.length)),
-              NFC_OTA_CHUNK_SIZE_ADDR,
-            );
-            await writeNFC(
-              Uint8List.fromList(_le32(chunkCrc)),
-              NFC_OTA_CRC32_ADDR,
-            );
-
-            // Write chunk data block by block with progress
-            final chunkBytes = Uint8List.fromList(chunkData);
-            final totalBlocks = (chunkBytes.length + 3) ~/ 4;
-            for (int blockIdx = 0; blockIdx < totalBlocks; blockIdx++) {
-              final blockAddr = NFC_OTA_DATA_ADDR + (blockIdx * 4);
-              final byteOffset = blockIdx * 4;
-              final block = Uint8List(4);
-              for (int j = 0; j < 4; j++) {
-                final idx = byteOffset + j;
-                block[j] = idx < chunkBytes.length ? chunkBytes[idx] : 0;
-              }
-              
-              // Update progress every 10 blocks to avoid too frequent UI updates
-              if (blockIdx % 10 == 0 || blockIdx == totalBlocks - 1) {
-                final blockProgress = ((blockIdx + 1) / totalBlocks * 100).toStringAsFixed(0);
-                setState(() {
-                  _progressDetail =
-                      'Chunk ${chunkNum + 1}/$totalChunks: Writing block ${blockIdx + 1}/$totalBlocks '
-                      '(addr 0x${blockAddr.toRadixString(16)}) - $blockProgress%';
-                });
-              }
-              
-              await writeNFC(block, blockAddr);
-            }
-
-            // Signal that data is ready
-            await writeNFC(
-              Uint8List.fromList(_le32(NFC_OTA_CMD_DATA)),
-              NFC_OTA_CMD_ADDR,
-            );
-
-            // Wait for ESP32 to process chunk
-            status = 0;
-            for (int poll = 0; poll < 200; poll++) {
-              await Future.delayed(const Duration(milliseconds: 100));
-              final statusBytes = await readNFC(4, NFC_OTA_STATUS_ADDR);
-              status = _u32le(statusBytes);
-              if (status == NFC_OTA_STATUS_READY) break;
-              if (status == NFC_OTA_STATUS_ERROR) {
-                throw Exception(
-                  'ESP32 reported error processing chunk $chunkNum',
-                );
-              }
-            }
-            if (status != NFC_OTA_STATUS_READY) {
-              throw Exception(
-                'Timeout waiting for ESP32 to process chunk $chunkNum',
-              );
-            }
-          }
-
-          // Step 3: Send OTA END command
-          setState(() {
-            _progressDetail = 'Finalizing firmware upload...';
-          });
-          await writeNFC(
-            Uint8List.fromList(_le32(NFC_OTA_CMD_END)),
-            NFC_OTA_CMD_ADDR,
-          );
-
-          // Wait for final status
-          status = 0;
-          for (int poll = 0; poll < 100; poll++) {
-            await Future.delayed(const Duration(milliseconds: 100));
-            final statusBytes = await readNFC(4, NFC_OTA_STATUS_ADDR);
-            status = _u32le(statusBytes);
-            if (status == NFC_OTA_STATUS_DONE) break;
-            if (status == NFC_OTA_STATUS_ERROR) {
-              throw Exception('ESP32 reported error during finalization');
-            }
-          }
-
-          setState(() {
-            _nfcStatus = 'Firmware upload complete! Device will reboot.';
-            _scanning = false;
-            _progressDetail = null;
-          });
 
           await nfc.NfcManager.instance.stopSession();
-
-          // Show success dialog
-          if (mounted) {
-            showDialog(
-              context: context,
-              builder: (context) => AlertDialog(
-                title: const Text('Firmware Upload Complete'),
-                content: Text(
-                  'Successfully sent $totalChunks chunks.\n'
-                  'Firmware size: ${firmwareBytes!.length} bytes.\n\n'
-                  'The device will now reboot to apply the update.',
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('OK'),
-                  ),
-                ],
-              ),
-            );
-          }
+          if (!nfcDone.isCompleted) nfcDone.complete(true);
         } catch (e) {
-          // Check if this is a connection dropped error
-          final errorStr = e.toString().toLowerCase();
-          final isConnectionDropped =
-              errorStr.contains('taglost') ||
-              errorStr.contains('tag lost') ||
-              errorStr.contains('transceive') ||
-              errorStr.contains('io exception') ||
-              errorStr.contains('ioexception') ||
-              errorStr.contains('connection') ||
-              errorStr.contains('removed');
-
+          await nfc.NfcManager.instance.stopSession();
+          if (!nfcDone.isCompleted) nfcDone.complete(false);
           setState(() {
-            if (isConnectionDropped) {
-              _nfcStatus =
-                  'NFC connection lost during firmware upload. Please try again.';
-            } else {
-              _nfcStatus = 'Firmware upload error: $e';
-            }
-          });
-          _disconnectTimer?.cancel();
-          _disconnectTimer = Timer(const Duration(seconds: 3), () async {
-            if (!mounted) return;
-            setState(() {
-              _scanning = false;
-              _progressDetail = null;
-            });
-            try {
-              await nfc.NfcManager.instance.stopSession();
-            } catch (_) {}
+            _nfcStatus = 'NFC error: $e';
           });
         }
       },
     );
+
+    final nfcSuccess = await nfcDone.future;
+    if (!nfcSuccess) {
+      setState(() {
+        _scanning = false;
+        _progressDetail = null;
+      });
+      return;
+    }
+
+    // ── Step 3: Scan for ESP32 BLE OTA service ──
+    setState(() {
+      _nfcStatus = 'NFC command sent! Scanning for device Bluetooth...';
+      _progressDetail =
+          'The device may take up to 5 minutes to enable Bluetooth.\n'
+          'You can move the phone away from the tag now.';
+    });
+
+    try {
+      // Turn on Bluetooth adapter if needed
+      if (await FlutterBluePlus.adapterState.first !=
+          BluetoothAdapterState.on) {
+        setState(() => _progressDetail = 'Waiting for Bluetooth to be enabled...');
+        await FlutterBluePlus.adapterState
+            .firstWhere((s) => s == BluetoothAdapterState.on)
+            .timeout(const Duration(seconds: 30));
+      }
+
+      BluetoothDevice? targetDevice;
+      final scanTimeout = const Duration(minutes: 5);
+      final scanStart = DateTime.now();
+
+      // Start scanning for the specific OTA service UUID
+      setState(() => _progressDetail = 'Scanning for OTA Bluetooth service...');
+
+      await FlutterBluePlus.startScan(
+        withServices: [BLE_OTA_SERVICE_UUID],
+        timeout: scanTimeout,
+      );
+
+      // Listen for scan results
+      await for (final results in FlutterBluePlus.scanResults) {
+        if (results.isNotEmpty) {
+          targetDevice = results.first.device;
+          break;
+        }
+        final elapsed = DateTime.now().difference(scanStart);
+        final remaining = scanTimeout - elapsed;
+        if (remaining.isNegative) break;
+        setState(() {
+          _progressDetail =
+              'Scanning for device... ${remaining.inSeconds}s remaining';
+        });
+      }
+
+      await FlutterBluePlus.stopScan();
+
+      if (targetDevice == null) {
+        setState(() {
+          _nfcStatus =
+              'Could not find the device via Bluetooth within 5 minutes.\n'
+              'Try again or move closer to the device.';
+          _scanning = false;
+          _progressDetail = null;
+        });
+        return;
+      }
+
+      // ── Step 4: Connect and transfer firmware ──
+      final device = targetDevice!;
+      setState(() {
+        _progressDetail =
+            'Found device: ${device.platformName.isNotEmpty ? device.platformName : device.remoteId}\nConnecting...';
+      });
+
+      await device.connect(
+        license: License.free,
+        timeout: const Duration(seconds: 15),
+        mtu: 512,
+      );
+
+      try {
+        final mtu = device.mtuNow;
+        print('[BLE OTA] Negotiated MTU: $mtu');
+
+        // Discover services
+        setState(() => _progressDetail = 'Discovering BLE services...');
+        final services = await device.discoverServices();
+        final otaService = services.firstWhere(
+          (s) => s.serviceUuid == BLE_OTA_SERVICE_UUID,
+          orElse: () => throw Exception('OTA service not found on device'),
+        );
+
+        final controlChar = otaService.characteristics.firstWhere(
+          (c) => c.characteristicUuid == BLE_OTA_CONTROL_CHAR_UUID,
+          orElse: () => throw Exception('OTA control characteristic not found'),
+        );
+        final dataChar = otaService.characteristics.firstWhere(
+          (c) => c.characteristicUuid == BLE_OTA_DATA_CHAR_UUID,
+          orElse: () => throw Exception('OTA data characteristic not found'),
+        );
+
+        // Subscribe to control notifications for status updates
+        await controlChar.setNotifyValue(true);
+        final statusStream = controlChar.onValueReceived;
+
+        // Send START command: [0x01, size_LE_4bytes]
+        setState(() => _progressDetail = 'Sending OTA start command...');
+        final startCmd = Uint8List(5);
+        startCmd[0] = BLE_OTA_CTRL_START;
+        startCmd[1] = firmwareSize & 0xFF;
+        startCmd[2] = (firmwareSize >> 8) & 0xFF;
+        startCmd[3] = (firmwareSize >> 16) & 0xFF;
+        startCmd[4] = (firmwareSize >> 24) & 0xFF;
+        await controlChar.write(startCmd, withoutResponse: false);
+
+        // Wait for READY
+        final readyResponse = await statusStream
+            .firstWhere((v) => v.isNotEmpty && (v[0] == BLE_OTA_STATUS_READY || v[0] == BLE_OTA_STATUS_ERROR))
+            .timeout(const Duration(seconds: 10));
+        if (readyResponse[0] == BLE_OTA_STATUS_ERROR) {
+          throw Exception('Device rejected OTA start');
+        }
+
+        // Send firmware data in MTU-sized chunks (minus 3 bytes for ATT overhead)
+        final chunkSize = (mtu - 3).clamp(20, 509);
+        final totalChunks = (firmwareSize / chunkSize).ceil();
+        int bytesSent = 0;
+
+        for (int i = 0; i < totalChunks; i++) {
+          final start = i * chunkSize;
+          final end = (start + chunkSize).clamp(0, firmwareSize);
+          final chunk = firmwareBytes.sublist(start, end);
+
+          // Write without response for speed
+          await dataChar.write(chunk.toList(), withoutResponse: true);
+          bytesSent += chunk.length;
+
+          final pct = (bytesSent / firmwareSize * 100).toStringAsFixed(1);
+          if (i % 10 == 0 || i == totalChunks - 1) {
+            setState(() {
+              _progressDetail =
+                  'Uploading firmware: $pct%\n'
+                  '$bytesSent / $firmwareSize bytes\n'
+                  'Chunk ${i + 1} / $totalChunks';
+            });
+          }
+
+          // Small delay every 20 chunks to avoid BLE congestion
+          if (i % 20 == 19) {
+            await Future.delayed(const Duration(milliseconds: 10));
+          }
+        }
+
+        // Send END command
+        setState(() => _progressDetail = 'Finalizing firmware update...');
+        await controlChar.write(
+          [BLE_OTA_CTRL_END],
+          withoutResponse: false,
+        );
+
+        // Wait for DONE (device may take time to verify and flash)
+        final doneResponse = await statusStream
+            .firstWhere((v) => v.isNotEmpty && (v[0] == BLE_OTA_STATUS_DONE || v[0] == BLE_OTA_STATUS_ERROR))
+            .timeout(const Duration(seconds: 30));
+
+        if (doneResponse[0] == BLE_OTA_STATUS_ERROR) {
+          throw Exception('Device reported error during finalization');
+        }
+
+        // Disconnect cleanly
+        await device.disconnect();
+
+        setState(() {
+          _nfcStatus = 'Firmware upload complete! Device will reboot.';
+          _scanning = false;
+          _progressDetail = null;
+        });
+
+        if (mounted) {
+          showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Firmware Upload Complete'),
+              content: Text(
+                'Successfully transferred $firmwareSize bytes via Bluetooth.\n\n'
+                'The device will now reboot to apply the update.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          );
+        }
+      } catch (e) {
+        // Try to disconnect on error
+        try {
+          await device.disconnect();
+        } catch (_) {}
+        rethrow;
+      }
+    } catch (e) {
+      await FlutterBluePlus.stopScan();
+      setState(() {
+        _nfcStatus = 'Firmware upload error: $e';
+        _scanning = false;
+        _progressDetail = null;
+      });
+    }
   }
 
   // Show dialog with sensor data
@@ -1901,7 +1832,9 @@ class _MyHomePageState extends State<MyHomePage> {
   //   }
   // }
 
-  // Write raw bytes to ISO15693 tag on Android using NfcV transceive (addressed mode, 4-byte blocks).
+  // Write raw bytes to ISO15693 tag on Android using NfcV transceive.
+  // Note: ST25DV does NOT support Write Multiple Blocks command (0x24),
+  // only Read Multiple Blocks. So we use single-block writes only.
   Future<void> _writeNfcVAndroid(
     android.NfcVAndroid v,
     Uint8List uid,
@@ -1911,32 +1844,28 @@ class _MyHomePageState extends State<MyHomePage> {
   }) async {
     // ISO15693 Flags: addressed (0x20) + high data rate (0x02)
     const int flags = 0x22;
-    const int cmdWriteSingleBlock = 0x21; // ISO15693 Write Single Block
-    const int cmdWriteSingleBlockExt =
-        0x31; // ISO15693 Extended Write Single Block (16-bit block number)
+    const int cmdWriteSingleBlock = 0x21;
+    const int cmdWriteSingleBlockExt = 0x31;
 
     final totalBlocks = (data.length + blockSize - 1) ~/ blockSize;
+    
     for (int i = 0; i < totalBlocks; i++) {
+      final int blockNumber = startBlock + i;
+      final bool extended = blockNumber > 0xFF;
       final offset = i * blockSize;
+      
+      // Prepare block data
       final block = Uint8List(blockSize);
       for (int j = 0; j < blockSize; j++) {
         final k = offset + j;
         block[j] = k < data.length ? data[k] : 0;
       }
 
-      // Frame: FLAGS | CMD | UID(8) | BLOCK# | DATA(blockSize)
+      // Build frame: FLAGS | CMD | UID(8) | BLOCK# | DATA(4)
       final frame = BytesBuilder();
-      final int blockNumber = startBlock + i;
-      final bool extended = blockNumber > 0xFF;
-      frame.add([
-        flags,
-        extended ? cmdWriteSingleBlockExt : cmdWriteSingleBlock,
-      ]);
-      frame.add(
-        uid,
-      ); // UID as provided by Android API works for addressed mode on most devices
+      frame.add([flags, extended ? cmdWriteSingleBlockExt : cmdWriteSingleBlock]);
+      frame.add(uid);
       if (extended) {
-        // 16-bit block number, LSB first
         frame.add([blockNumber & 0xFF, (blockNumber >> 8) & 0xFF]);
       } else {
         frame.add([blockNumber & 0xFF]);
@@ -1944,10 +1873,9 @@ class _MyHomePageState extends State<MyHomePage> {
       frame.add(block);
 
       final response = await v.transceive(frame.toBytes());
-      // Optional: check response[0] == 0x00 (success) per ISO15693 response format
       if (response.isEmpty || response[0] != 0x00) {
         throw Exception(
-          'Write block ${blockNumber} failed (resp: ${response.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')})',
+          'Write block $blockNumber failed (resp: ${response.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')})',
         );
       }
     }

@@ -1,252 +1,207 @@
-# NFC OTA Firmware Update Protocol
+# NFC + BLE OTA Firmware Update Protocol
 
-This document describes the EEPROM-based OTA (Over-The-Air) firmware update protocol used between the Flutter app and ESP32 via the ST25DV NFC tag.
+This document describes the hybrid NFC/BLE OTA (Over-The-Air) firmware update protocol used between the Flutter app and ESP32 via the ST25DV NFC tag and Bluetooth Low Energy.
 
 ## Overview
 
-The protocol uses the ST25DV EEPROM memory (not the mailbox/FTM) to transfer firmware data in chunks. This is similar to the existing sensor data transfer protocol, providing reliable communication through polling-based handshaking.
+The app writes a single NFC command to the ST25DV EEPROM telling the ESP32 to enable its BLE radio. The ESP32 then advertises a BLE GATT OTA service, and the app automatically discovers and connects to it to transfer the firmware. This is much faster than pure NFC EEPROM transfer.
 
-## Memory Map
-
-| Address | Size | Name | Description |
-|---------|------|------|-------------|
-| 0x78 | 4 bytes | `NFC_OTA_CMD_ADDR` | Command field (written by app) |
-| 0x7C | 4 bytes | `NFC_OTA_STATUS_ADDR` | Status field (written by ESP32) |
-| 0x80 | 4 bytes | `NFC_OTA_CHUNK_NUM_ADDR` | Current chunk number (0-indexed) |
-| 0x84 | 4 bytes | `NFC_OTA_TOTAL_SIZE_ADDR` | Total firmware size in bytes |
-| 0x88 | 4 bytes | `NFC_OTA_CHUNK_SIZE_ADDR` | Current chunk size in bytes |
-| 0x8C | 4 bytes | `NFC_OTA_CRC32_ADDR` | CRC32 of current chunk data |
-| 0xC8 | variable | `NFC_OTA_DATA_ADDR` | Firmware chunk data (max 1800 bytes) |
-
-> **Note:** All multi-byte values are stored in **little-endian** format.
-
-## Commands (App → ESP32)
-
-Written to `NFC_OTA_CMD_ADDR` (0x78):
-
-| Command | Value (hex) | ASCII | Description |
-|---------|-------------|-------|-------------|
-| `NFC_OTA_CMD_NONE` | 0x00000000 | - | Idle / No command |
-| `NFC_OTA_CMD_START` | 0x4F544153 | 'SATO' | Start OTA transfer |
-| `NFC_OTA_CMD_DATA` | 0x4F544144 | 'DATO' | Data chunk ready for processing |
-| `NFC_OTA_CMD_END` | 0x4F544145 | 'EATO' | End of transfer, finalize update |
-| `NFC_OTA_CMD_ABORT` | 0x4F544158 | 'XATO' | Abort transfer |
-
-> **Note:** ASCII shown is reversed due to little-endian storage. In memory: 'OTAS', 'OTAD', 'OTAE', 'OTAX'.
-
-## Status Codes (ESP32 → App)
-
-Written to `NFC_OTA_STATUS_ADDR` (0x7C):
-
-| Status | Value (hex) | ASCII | Description |
-|--------|-------------|-------|-------------|
-| `NFC_OTA_STATUS_IDLE` | 0x00000000 | - | Idle state |
-| `NFC_OTA_STATUS_READY` | 0x4F545259 | 'YRTO' | Ready for next chunk |
-| `NFC_OTA_STATUS_BUSY` | 0x4F544259 | 'YBTO' | Currently processing |
-| `NFC_OTA_STATUS_ERROR` | 0x4F544552 | 'RETO' | Error occurred |
-| `NFC_OTA_STATUS_DONE` | 0x4F54444E | 'NDTO' | OTA complete, rebooting |
-
-> **Note:** In memory: 'OTRY', 'OTBY', 'OTER', 'OTDN'.
-
-## Protocol Flow
-
-### 1. Start Transfer
+## Update Flow
 
 ```
-App                                 ESP32
- |                                    |
- |-- Write total_size to 0x84 ------->|
- |-- Write chunk_num=0 to 0x80 ------>|
- |-- Write CMD_START to 0x78 -------->|
- |                                    |
- |<--- Poll STATUS at 0x7C -----------|
- |     (wait for STATUS_READY)        |
- |                                    |
+┌─────────┐         ┌──────────┐         ┌─────────┐
+│   App   │         │ ST25DV   │         │  ESP32  │
+│ (Phone) │         │ (EEPROM) │         │         │
+└────┬────┘         └────┬─────┘         └────┬────┘
+     │                   │                    │
+     │  1. Write         │                    │
+     │  NFC_OTA_CMD_BLE  │                    │
+     │  to 0x78          │                    │
+     │──────────────────>│                    │
+     │                   │  2. ESP32 polls    │
+     │                   │  and reads cmd     │
+     │                   │<───────────────────│
+     │                   │                    │
+     │                   │  3. ESP32 enables  │
+     │                   │  BLE (up to 5 min) │
+     │                   │                    │
+     │  4. App scans for BLE OTA service      │
+     │  (service UUID: 4FAFC201-...)          │
+     │<───────────────── BLE Advertisement ───│
+     │                                        │
+     │  5. App connects via BLE               │
+     │───────────────────────────────────────>│
+     │                                        │
+     │  6. Send START cmd (size)              │
+     │───────────────────────────────────────>│
+     │                                        │
+     │  7. Stream firmware data chunks        │
+     │═══════════════════════════════════════>│
+     │                                        │
+     │  8. Send END cmd                       │
+     │───────────────────────────────────────>│
+     │                                        │
+     │  9. DONE notification                  │
+     │<───────────────────────────────────────│
+     │                                   [REBOOT]
 ```
 
-**ESP32 actions on CMD_START:**
-1. Read total firmware size from `NFC_OTA_TOTAL_SIZE_ADDR`
-2. Initialize OTA partition
-3. Allocate buffers
-4. Write `STATUS_READY` to indicate ready for first chunk
+## Step 1: NFC Trigger
 
-### 2. Send Chunks
+The app writes a single 4-byte command to EEPROM address `0x78`:
 
-Repeat for each chunk (chunk_num = 0, 1, 2, ...):
+| Address | Size | Value | ASCII | Description |
+|---------|------|-------|-------|-------------|
+| 0x78 | 4 bytes | `0x4F544142` | 'OTAB' | Enable BLE for OTA update |
 
-```
-App                                 ESP32
- |                                    |
- |-- Write chunk_num to 0x80 -------->|
- |-- Write chunk_size to 0x88 ------->|
- |-- Write crc32 to 0x8C ------------>|
- |-- Write chunk_data to 0xC8 ------->|
- |-- Write CMD_DATA to 0x78 --------->|
- |                                    |
- |<--- Poll STATUS at 0x7C -----------|
- |     (wait for STATUS_READY)        |
- |                                    |
-```
+After writing, the phone can be moved away from the NFC tag. The ESP32 polls this address and, upon seeing the command, enables its BLE radio and starts advertising the OTA service.
 
-**ESP32 actions on CMD_DATA:**
-1. Read chunk metadata (chunk_num, chunk_size, expected CRC32)
-2. Read chunk data from `NFC_OTA_DATA_ADDR`
-3. Verify CRC32 matches
-4. Write chunk to OTA partition
-5. If CRC mismatch: write `STATUS_ERROR`
-6. If success: write `STATUS_READY`
+**Note:** The ESP32 may take **up to 5 minutes** to enable BLE after the command is written, depending on its current power state and polling interval.
 
-### 3. End Transfer
+## Step 2: BLE Discovery & Connection
 
-```
-App                                 ESP32
- |                                    |
- |-- Write CMD_END to 0x78 ---------->|
- |                                    |
- |<--- Poll STATUS at 0x7C -----------|
- |     (wait for STATUS_DONE)         |
- |                                    |
- |                              [REBOOT]
-```
+The app automatically scans for a BLE device advertising the OTA service UUID. No user interaction is required.
 
-**ESP32 actions on CMD_END:**
-1. Finalize OTA partition
-2. Validate complete firmware
-3. Set boot partition to new firmware
-4. Write `STATUS_DONE`
-5. Reboot
+### BLE UUIDs
 
-## Chunk Size
+| UUID | Name | Description |
+|------|------|-------------|
+| `4FAFC201-1FB5-459E-8FCC-C5C9C331914B` | OTA Service | Main OTA service |
+| `D5875408-FA51-4763-A75D-7D33CECEBC31` | OTA Control | Control characteristic (write + notify) |
+| `BEB5483E-36E1-4688-B7F5-EA07361B26A8` | OTA Data | Firmware data characteristic (write without response) |
 
-- **Maximum chunk size:** 1800 bytes (`NFC_OTA_MAX_CHUNK_SIZE`)
-- The last chunk may be smaller than 1800 bytes
-- Total chunks = ceil(firmware_size / 1800)
+### BLE Control Commands (App → ESP32)
 
-## CRC32 Calculation
+Written to the **OTA Control** characteristic:
 
-Standard CRC32 algorithm with polynomial `0xEDB88320`:
+| Command | Byte(s) | Description |
+|---------|---------|-------------|
+| START | `0x01` + 4 bytes (LE firmware size) | Start OTA, total size follows |
+| END | `0x02` | All data sent, verify & apply |
+| ABORT | `0x03` | Cancel the update |
 
-```c
-uint32_t calculate_crc32(const uint8_t *data, size_t length) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < length; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    return crc ^ 0xFFFFFFFF;
-}
-```
+### BLE Status Notifications (ESP32 → App)
+
+Sent via notifications on the **OTA Control** characteristic:
+
+| Status | Byte | Description |
+|--------|------|-------------|
+| READY | `0x01` | Ready for data / start acknowledged |
+| ERROR | `0x02` | Error occurred (may include error code in byte 2) |
+| DONE | `0x03` | Firmware verified, rebooting |
+
+## Step 3: Firmware Transfer
+
+1. App sends **START** command with firmware size via the control characteristic
+2. App waits for **READY** notification
+3. App streams firmware binary in MTU-sized chunks via the data characteristic (write without response)
+4. App sends **END** command via the control characteristic
+5. ESP32 verifies the firmware, writes to flash, and sends **DONE** notification
+6. ESP32 reboots
+
+### MTU & Chunk Size
+
+- App requests MTU of 512 bytes
+- Actual chunk size = negotiated MTU − 3 (ATT overhead)
+- Typical chunk size: 244–509 bytes (much faster than NFC's 4 bytes/block)
 
 ## Timing
 
-- **Polling interval:** 100ms
-- **Chunk processing timeout:** 20 seconds (200 polls)
-- **Start/End timeout:** 10 seconds (100 polls)
+| Parameter | Value |
+|-----------|-------|
+| BLE scan timeout | 5 minutes |
+| BLE connection timeout | 15 seconds |
+| START acknowledgment timeout | 10 seconds |
+| END/DONE timeout | 30 seconds |
+| Inter-chunk delay | 10ms every 20 chunks |
 
 ## Error Handling
 
 ### App-side
-- If `STATUS_ERROR` received: abort and show error message
-- If timeout waiting for status: abort and show timeout error
-- If NFC connection lost: show reconnect message
+- If BLE device not found within 5 minutes: show timeout, suggest retry
+- If BLE connection drops: show error, clean up
+- If ERROR notification received: abort and show error message
+- If DONE timeout: show verification error
 
 ### ESP32-side
-- If CRC mismatch: write `STATUS_ERROR` (app should abort)
-- If write to flash fails: write `STATUS_ERROR`
-- If invalid chunk number: write `STATUS_ERROR`
+- If firmware verification fails: send ERROR notification
+- If flash write fails: send ERROR notification
+- After DONE: reboot to new firmware
 
-## Example ESP32 Implementation (Pseudocode)
+## ESP32 Implementation Notes
 
+### NFC Polling
 ```c
-void nfc_ota_task(void) {
-    while (1) {
-        uint32_t cmd = read_nfc_u32(NFC_OTA_CMD_ADDR);
-        
-        switch (cmd) {
-            case NFC_OTA_CMD_START:
-                total_size = read_nfc_u32(NFC_OTA_TOTAL_SIZE_ADDR);
-                if (ota_begin(total_size) == OK) {
-                    expected_chunk = 0;
-                    write_nfc_u32(NFC_OTA_STATUS_ADDR, NFC_OTA_STATUS_READY);
-                } else {
-                    write_nfc_u32(NFC_OTA_STATUS_ADDR, NFC_OTA_STATUS_ERROR);
-                }
-                write_nfc_u32(NFC_OTA_CMD_ADDR, NFC_OTA_CMD_NONE);
-                break;
-                
-            case NFC_OTA_CMD_DATA:
-                chunk_num = read_nfc_u32(NFC_OTA_CHUNK_NUM_ADDR);
-                chunk_size = read_nfc_u32(NFC_OTA_CHUNK_SIZE_ADDR);
-                expected_crc = read_nfc_u32(NFC_OTA_CRC32_ADDR);
-                
-                read_nfc_data(NFC_OTA_DATA_ADDR, buffer, chunk_size);
-                actual_crc = calculate_crc32(buffer, chunk_size);
-                
-                if (actual_crc != expected_crc) {
-                    write_nfc_u32(NFC_OTA_STATUS_ADDR, NFC_OTA_STATUS_ERROR);
-                } else if (ota_write(buffer, chunk_size) == OK) {
-                    expected_chunk++;
-                    write_nfc_u32(NFC_OTA_STATUS_ADDR, NFC_OTA_STATUS_READY);
-                } else {
-                    write_nfc_u32(NFC_OTA_STATUS_ADDR, NFC_OTA_STATUS_ERROR);
-                }
-                write_nfc_u32(NFC_OTA_CMD_ADDR, NFC_OTA_CMD_NONE);
-                break;
-                
-            case NFC_OTA_CMD_END:
-                if (ota_end() == OK) {
-                    write_nfc_u32(NFC_OTA_STATUS_ADDR, NFC_OTA_STATUS_DONE);
-                    vTaskDelay(100 / portTICK_PERIOD_MS);
-                    esp_restart();
-                } else {
-                    write_nfc_u32(NFC_OTA_STATUS_ADDR, NFC_OTA_STATUS_ERROR);
-                }
-                break;
-                
-            case NFC_OTA_CMD_ABORT:
-                ota_abort();
-                write_nfc_u32(NFC_OTA_STATUS_ADDR, NFC_OTA_STATUS_IDLE);
-                write_nfc_u32(NFC_OTA_CMD_ADDR, NFC_OTA_CMD_NONE);
-                break;
+// In the main NFC polling loop:
+uint32_t cmd = read_nfc_u32(NFC_OTA_CMD_ADDR);  // 0x78
+if (cmd == 0x4F544142) {  // 'OTAB'
+    // Clear the command
+    write_nfc_u32(NFC_OTA_CMD_ADDR, 0x00000000);
+    // Enable BLE and start advertising OTA service
+    start_ble_ota_server();
+}
+```
+
+### BLE GATT Server
+```c
+// Service: 4FAFC201-1FB5-459E-8FCC-C5C9C331914B
+// Control char: D5875408-FA51-4763-A75D-7D33CECEBC31  (write + notify)
+// Data char:    BEB5483E-36E1-4688-B7F5-EA07361B26A8  (write no response)
+
+void on_control_write(uint8_t *data, uint16_t len) {
+    if (data[0] == 0x01 && len >= 5) {
+        // START: extract firmware size (LE 4 bytes)
+        uint32_t size = data[1] | (data[2]<<8) | (data[3]<<16) | (data[4]<<24);
+        ota_begin(size);
+        notify_control(0x01);  // READY
+    } else if (data[0] == 0x02) {
+        // END: verify and apply
+        if (ota_end() == OK) {
+            notify_control(0x03);  // DONE
+            reboot();
+        } else {
+            notify_control(0x02);  // ERROR
         }
-        
-        vTaskDelay(50 / portTICK_PERIOD_MS);
+    } else if (data[0] == 0x03) {
+        // ABORT
+        ota_abort();
     }
+}
+
+void on_data_write(uint8_t *data, uint16_t len) {
+    ota_write(data, len);
 }
 ```
 
 ## Constants Header File
 
 ```c
-// NFC OTA Protocol addresses
-#define NFC_OTA_CMD_ADDR        0x78  // Command field
-#define NFC_OTA_STATUS_ADDR     0x7C  // Status field
-#define NFC_OTA_CHUNK_NUM_ADDR  0x80  // Current chunk number
-#define NFC_OTA_TOTAL_SIZE_ADDR 0x84  // Total firmware size
-#define NFC_OTA_CHUNK_SIZE_ADDR 0x88  // Current chunk size
-#define NFC_OTA_CRC32_ADDR      0x8C  // CRC32 of chunk
-#define NFC_OTA_DATA_ADDR       0xC8  // Data payload start
+// NFC OTA trigger address (EEPROM)
+#define NFC_OTA_CMD_ADDR         0x78       // Command field
+#define NFC_OTA_CMD_NONE         0x00000000 // No command
+#define NFC_OTA_CMD_BLE_ENABLE   0x4F544142 // 'OTAB' - Enable BLE for OTA
 
-// OTA Commands (app -> ESP32)
-#define NFC_OTA_CMD_NONE   0x00000000
-#define NFC_OTA_CMD_START  0x4F544153  // 'OTAS'
-#define NFC_OTA_CMD_DATA   0x4F544144  // 'OTAD'
-#define NFC_OTA_CMD_END    0x4F544145  // 'OTAE'
-#define NFC_OTA_CMD_ABORT  0x4F544158  // 'OTAX'
+// BLE OTA Service and Characteristic UUIDs
+// Service:  4FAFC201-1FB5-459E-8FCC-C5C9C331914B
+// Control:  D5875408-FA51-4763-A75D-7D33CECEBC31
+// Data:     BEB5483E-36E1-4688-B7F5-EA07361B26A8
 
-// OTA Status (ESP32 -> app)
-#define NFC_OTA_STATUS_IDLE  0x00000000
-#define NFC_OTA_STATUS_READY 0x4F545259  // 'OTRY'
-#define NFC_OTA_STATUS_BUSY  0x4F544259  // 'OTBY'
-#define NFC_OTA_STATUS_ERROR 0x4F544552  // 'OTER'
-#define NFC_OTA_STATUS_DONE  0x4F54444E  // 'OTDN'
+// BLE OTA Control Commands (app -> ESP32)
+#define BLE_OTA_CTRL_START  0x01
+#define BLE_OTA_CTRL_END    0x02
+#define BLE_OTA_CTRL_ABORT  0x03
 
-// Chunk size
-#define NFC_OTA_MAX_CHUNK_SIZE 1800
+// BLE OTA Status Notifications (ESP32 -> app)
+#define BLE_OTA_STATUS_READY  0x01
+#define BLE_OTA_STATUS_ERROR  0x02
+#define BLE_OTA_STATUS_DONE   0x03
 ```
+
+## Migration from Pure NFC OTA
+
+The previous protocol transferred firmware entirely over NFC EEPROM in 1800-byte chunks, which was very slow. The new protocol:
+
+- Uses NFC only for a **single 4-byte trigger write**
+- Transfers firmware data over **BLE** (orders of magnitude faster)
+- Requires no user interaction for BLE pairing/selection
+- Phone can be moved away from the device after the NFC tap
