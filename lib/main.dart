@@ -729,10 +729,65 @@ class _MyHomePageState extends State<MyHomePage> {
     const entryCount = 100;
     const intervalMinutes = 5;
 
+    // Determine the time range we would generate into
+    final oldestEntryTime = lastReadoutTime.subtract(
+      const Duration(minutes: (entryCount - 1) * intervalMinutes),
+    );
+    final oldestTimestamp = oldestEntryTime.millisecondsSinceEpoch ~/ 1000;
+    final newestTimestamp = lastReadoutTime.millisecondsSinceEpoch ~/ 1000;
+
+    // Find existing entries that fall within this time range
+    final existingInRange = _sensorDataStore.keys
+        .where((ts) => ts >= oldestTimestamp && ts <= newestTimestamp)
+        .toSet();
+
+    // If the range is already fully covered, skip generation
+    if (existingInRange.length >= entryCount) {
+      setState(() {
+        _nfcStatus =
+            '[DEMO] No new data — time range already covered (${existingInRange.length} existing points).';
+      });
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Demo Readout'),
+            content: Text(
+              'No new entries to add.\n'
+              'The time range already has ${existingInRange.length} data points.\n'
+              'Total stored: ${_sensorDataStore.length} data points.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
+      return;
+    }
+
     // Realistic dust sensor simulation (PM2.5 in µg/m³)
     // Baseline ~25-40, with slow drift and occasional bumps
-    double currentValue = 30.0 + random.nextDouble() * 10;
+    // Seed currentValue from last existing entry if possible, for continuity
+    double currentValue;
+    if (_sensorDataStore.isNotEmpty) {
+      final sortedKeys = _sensorDataStore.keys.toList()..sort();
+      // Find the closest existing entry before our generation window
+      final beforeKeys = sortedKeys.where((ts) => ts <= oldestTimestamp);
+      if (beforeKeys.isNotEmpty) {
+        currentValue = _sensorDataStore[beforeKeys.last]!.sensorValue.toDouble();
+      } else {
+        currentValue = 30.0 + random.nextDouble() * 10;
+      }
+    } else {
+      currentValue = 30.0 + random.nextDouble() * 10;
+    }
+
     final entries = <SensorLogEntry>[];
+    int skippedCount = 0;
 
     for (int i = 0; i < entryCount; i++) {
       // Time for this entry (oldest first)
@@ -741,13 +796,22 @@ class _MyHomePageState extends State<MyHomePage> {
       );
       final unixTimestamp = entryTime.millisecondsSinceEpoch ~/ 1000;
 
-      // Random walk with mean reversion toward ~35 µg/m³
+      // Always advance the random walk so values stay consistent
       final meanTarget = 35.0;
-      final drift = (meanTarget - currentValue) * 0.05; // pull toward mean
-      final noise = (random.nextDouble() - 0.5) * 6; // small random step
-      // Occasional spike (2% chance)
+      final drift = (meanTarget - currentValue) * 0.05;
+      final noise = (random.nextDouble() - 0.5) * 6;
       final spike = random.nextDouble() < 0.02 ? random.nextDouble() * 40 : 0.0;
       currentValue = (currentValue + drift + noise + spike).clamp(5.0, 200.0);
+
+      // Only create the entry if no existing data at or near this timestamp
+      // (within half the interval = 150 seconds)
+      final hasNearby = _sensorDataStore.keys.any(
+        (ts) => (ts - unixTimestamp).abs() < intervalMinutes * 60 ~/ 2,
+      );
+      if (hasNearby) {
+        skippedCount++;
+        continue;
+      }
 
       entries.add(SensorLogEntry(
         sensorValue: currentValue.round(),
@@ -757,7 +821,7 @@ class _MyHomePageState extends State<MyHomePage> {
       ));
     }
 
-    // Store entries
+    // Store only the fresh entries
     int newCount = 0;
     for (final entry in entries) {
       if (!_sensorDataStore.containsKey(entry.unixTimestamp)) {
@@ -765,12 +829,14 @@ class _MyHomePageState extends State<MyHomePage> {
         newCount++;
       }
     }
-    await _saveSensorDataToStorage();
+    if (newCount > 0) {
+      await _saveSensorDataToStorage();
+    }
 
     setState(() {
       _sensorLogEntries = entries;
       _nfcStatus =
-          '[DEMO] Generated ${entries.length} entries. Total stored: ${_sensorDataStore.length}.';
+          '[DEMO] Added $newCount new entries (skipped $skippedCount existing). Total: ${_sensorDataStore.length}.';
       _scanning = false;
       _progressDetail = null;
     });
@@ -781,8 +847,8 @@ class _MyHomePageState extends State<MyHomePage> {
         builder: (context) => AlertDialog(
           title: const Text('Demo Readout Complete'),
           content: Text(
-            'Generated ${entries.length} simulated entries.\n'
-            '$newCount new entries added.\n'
+            'Generated $newCount new entries.\n'
+            'Skipped $skippedCount (already had data in that time slot).\n'
             'Total stored: ${_sensorDataStore.length} data points.',
           ),
           actions: [
