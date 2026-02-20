@@ -224,6 +224,97 @@ class _ShowDataPageState extends State<ShowDataPage> {
     });
   }
 
+  void _setRange(Duration duration) {
+    if (_sortedEntries.isEmpty) return;
+    
+    final now = DateTime.now();
+    final cutoffTime = now.subtract(duration);
+    final cutoffTimestamp = cutoffTime.millisecondsSinceEpoch ~/ 1000;
+
+    // Find the index of the first entry that is after the cutoff time
+    int startIndex = _sortedEntries.indexWhere((e) => e.unixTimestamp >= cutoffTimestamp);
+    
+    setState(() {
+      if (startIndex == -1) {
+        // No data in this range, just show the last few points or reset
+        _visMinX = (_fullMaxX - 10).clamp(_fullMinX, _fullMaxX);
+      } else {
+        _visMinX = startIndex.toDouble();
+      }
+      _visMaxX = _fullMaxX;
+      
+      _autoScaleY();
+    });
+  }
+
+  void _autoScaleY() {
+    if (_visMinX < _visMaxX) {
+      final visibleEntries = _sortedEntries.sublist(_visMinX.toInt(), _visMaxX.toInt() + 1);
+      if (visibleEntries.isNotEmpty) {
+        final minValue = visibleEntries.map((e) => e.sensorValue).reduce((a, b) => a < b ? a : b);
+        final maxValue = visibleEntries.map((e) => e.sensorValue).reduce((a, b) => a > b ? a : b);
+        _visMinY = (minValue * 0.9).floorToDouble();
+        _visMaxY = (maxValue * 1.1).ceilToDouble();
+        if (_visMinY == _visMaxY) _visMaxY = _visMinY + 10;
+      }
+    }
+  }
+
+  Future<void> _pickDateRange(BuildContext context, bool isStart) async {
+    final initialDate = isStart
+        ? _sortedEntries[_visMinX.toInt()].dateTime.toLocal()
+        : _sortedEntries[_visMaxX.toInt()].dateTime.toLocal();
+
+    final pickedDate = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: _sortedEntries.first.dateTime.toLocal(),
+      lastDate: _sortedEntries.last.dateTime.toLocal(),
+    );
+
+    if (pickedDate == null) return;
+    if (!context.mounted) return;
+
+    final pickedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initialDate),
+    );
+
+    if (pickedTime == null) return;
+
+    final selectedDateTime = DateTime(
+      pickedDate.year,
+      pickedDate.month,
+      pickedDate.day,
+      pickedTime.hour,
+      pickedTime.minute,
+    );
+    final selectedTimestamp = selectedDateTime.millisecondsSinceEpoch ~/ 1000;
+
+    setState(() {
+      if (isStart) {
+        int startIndex = _sortedEntries.indexWhere((e) => e.unixTimestamp >= selectedTimestamp);
+        if (startIndex != -1 && startIndex < _visMaxX) {
+          _visMinX = startIndex.toDouble();
+        } else if (startIndex != -1) {
+          // If start is after end, push end forward
+          _visMinX = startIndex.toDouble();
+          _visMaxX = _fullMaxX;
+        }
+      } else {
+        int endIndex = _sortedEntries.lastIndexWhere((e) => e.unixTimestamp <= selectedTimestamp);
+        if (endIndex != -1 && endIndex > _visMinX) {
+          _visMaxX = endIndex.toDouble();
+        } else if (endIndex != -1) {
+          // If end is before start, push start backward
+          _visMaxX = endIndex.toDouble();
+          _visMinX = _fullMinX;
+        }
+      }
+      _autoScaleY();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_sortedEntries.isEmpty) {
@@ -258,18 +349,74 @@ class _ShowDataPageState extends State<ShowDataPage> {
         child: Column(
           children: [
             // Time range info
-            Text(
-              'From: ${_sortedEntries.first.dateTime.toLocal()}',
-              style: const TextStyle(fontSize: 12),
-            ),
-            Text(
-              'To: ${_sortedEntries.last.dateTime.toLocal()}',
-              style: const TextStyle(fontSize: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text('From: ', style: TextStyle(fontSize: 12)),
+                InkWell(
+                  onTap: () => _pickDateRange(context, true),
+                  child: Text(
+                    _sortedEntries[_visMinX.toInt()].dateTime.toLocal().toString().substring(0, 16),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.blue,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                const Text('To: ', style: TextStyle(fontSize: 12)),
+                InkWell(
+                  onTap: () => _pickDateRange(context, false),
+                  child: Text(
+                    _sortedEntries[_visMaxX.toInt()].dateTime.toLocal().toString().substring(0, 16),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.blue,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 4),
             Text(
               'Pinch to zoom · Drag to pan',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 8),
+            // Range buttons
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  OutlinedButton(
+                    onPressed: () => _setRange(const Duration(hours: 1)),
+                    child: const Text('1h'),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: () => _setRange(const Duration(hours: 8)),
+                    child: const Text('8h'),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: () => _setRange(const Duration(days: 1)),
+                    child: const Text('1d'),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: () => _setRange(const Duration(days: 7)),
+                    child: const Text('1w'),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: _resetZoom,
+                    child: const Text('All'),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 12),
             // Chart
