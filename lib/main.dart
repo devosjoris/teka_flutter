@@ -4,6 +4,7 @@ import 'package:nfc_manager/nfc_manager_android.dart' as android;
 import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:async';
+import 'dart:math';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:http/http.dart' as http;
@@ -381,6 +382,9 @@ class _MyHomePageState extends State<MyHomePage> {
   // Firmware download URL
   static const String FIRMWARE_BASE_URL = 'https://www.devosjoris.be/teka_fw';
 
+  // Demo mode flag
+  bool _demoMode = false;
+
   // Sensor log entries read from device
   List<SensorLogEntry> _sensorLogEntries = [];
 
@@ -470,14 +474,25 @@ class _MyHomePageState extends State<MyHomePage> {
     );
     final maxController = TextEditingController(text: _maxLevel.toString());
     int tempMode = _measureMode;
+    bool tempDemoMode = _demoMode;
     await showDialog(
       context: context,
       builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
         return AlertDialog(
           title: const Text('Settings'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              SwitchListTile(
+                title: const Text('Demo Mode'),
+                subtitle: const Text('Simulate NFC/sensor connections'),
+                value: tempDemoMode,
+                onChanged: (v) => setDialogState(() => tempDemoMode = v),
+                contentPadding: EdgeInsets.zero,
+              ),
+              const Divider(),
               TextField(
                 controller: nameController,
                 maxLength: 30,
@@ -565,6 +580,7 @@ class _MyHomePageState extends State<MyHomePage> {
                   _measureMode = tempMode;
                   _warningLevel = warn;
                   _maxLevel = maxv;
+                  _demoMode = tempDemoMode;
                 });
                 await _saveConfigToStorage();
                 if (context.mounted) Navigator.pop(context);
@@ -573,11 +589,109 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
           ],
         );
+          },
+        );
       },
     );
   }
 
   // _showConfigDialog removed; use _openSettings instead.
+
+  // Generate realistic demo sensor data
+  Future<void> _generateDemoSensorData() async {
+    final random = Random();
+    final now = DateTime.now();
+    // Last readout was 5 minutes ago, 100 entries at 5-min intervals
+    final lastReadoutTime = now.subtract(const Duration(minutes: 5));
+    const entryCount = 100;
+    const intervalMinutes = 5;
+
+    // Realistic dust sensor simulation (PM2.5 in µg/m³)
+    // Baseline ~25-40, with slow drift and occasional bumps
+    double currentValue = 30.0 + random.nextDouble() * 10;
+    final entries = <SensorLogEntry>[];
+
+    for (int i = 0; i < entryCount; i++) {
+      // Time for this entry (oldest first)
+      final entryTime = lastReadoutTime.subtract(
+        Duration(minutes: (entryCount - 1 - i) * intervalMinutes),
+      );
+      final unixTimestamp = entryTime.millisecondsSinceEpoch ~/ 1000;
+
+      // Random walk with mean reversion toward ~35 µg/m³
+      final meanTarget = 35.0;
+      final drift = (meanTarget - currentValue) * 0.05; // pull toward mean
+      final noise = (random.nextDouble() - 0.5) * 6; // small random step
+      // Occasional spike (2% chance)
+      final spike = random.nextDouble() < 0.02 ? random.nextDouble() * 40 : 0.0;
+      currentValue = (currentValue + drift + noise + spike).clamp(5.0, 200.0);
+
+      entries.add(SensorLogEntry(
+        sensorValue: currentValue.round(),
+        unixTimestamp: unixTimestamp,
+        rtcValid: true,
+        readoutDone: false,
+      ));
+    }
+
+    // Store entries
+    int newCount = 0;
+    for (final entry in entries) {
+      if (!_sensorDataStore.containsKey(entry.unixTimestamp)) {
+        _sensorDataStore[entry.unixTimestamp] = entry;
+        newCount++;
+      }
+    }
+    await _saveSensorDataToStorage();
+
+    setState(() {
+      _sensorLogEntries = entries;
+      _nfcStatus =
+          '[DEMO] Generated ${entries.length} entries. Total stored: ${_sensorDataStore.length}.';
+      _scanning = false;
+      _progressDetail = null;
+    });
+
+    if (mounted) {
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Demo Readout Complete'),
+          content: Text(
+            'Generated ${entries.length} simulated entries.\n'
+            '$newCount new entries added.\n'
+            'Total stored: ${_sensorDataStore.length} data points.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
+  // Simulate connection in demo mode
+  Future<void> _simulateDemoConnection() async {
+    setState(() {
+      _nfcStatus = '[DEMO] Simulating connection...';
+      _scanning = true;
+      _progressDetail = 'Simulating NFC tag discovery...';
+    });
+    await Future.delayed(const Duration(milliseconds: 800));
+    setState(() {
+      _progressDetail = 'Reading sensor config...';
+    });
+    await Future.delayed(const Duration(milliseconds: 600));
+    setState(() {
+      _lastWriteAddress = 200;
+      _nfcStatus = '[DEMO] Connected. Sensor settings synchronized.';
+      _scanning = false;
+      _progressDetail = null;
+    });
+  }
 
   Future<void> _connectToSensor() async {
     setState(() {
@@ -941,6 +1055,7 @@ class _MyHomePageState extends State<MyHomePage> {
     await prefs.setInt('measureMode', _measureMode);
     await prefs.setInt('warningLevel', _warningLevel);
     await prefs.setInt('maxLevel', _maxLevel);
+    await prefs.setBool('demoMode', _demoMode);
   }
 
   Future<void> _loadConfigFromStorage() async {
@@ -951,6 +1066,7 @@ class _MyHomePageState extends State<MyHomePage> {
       _warningLevel = prefs.getInt('warningLevel') ?? 0;
       _maxLevel = prefs.getInt('maxLevel') ?? 0;
       _lastTimestampWriteMs = prefs.getInt('lastTsWriteMs');
+      _demoMode = prefs.getBool('demoMode') ?? false;
     });
     // Load sensor data from storage
     await _loadSensorDataFromStorage();
@@ -1962,6 +2078,30 @@ class _MyHomePageState extends State<MyHomePage> {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (_demoMode)
+              Container(
+                padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange),
+                ),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.science, color: Colors.orange, size: 18),
+                    SizedBox(width: 8),
+                    Text(
+                      'DEMO MODE',
+                      style: TextStyle(
+                        color: Colors.orange,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             if (_scanning) ...[
               const LinearProgressIndicator(),
               const SizedBox(height: 8),
@@ -2025,7 +2165,9 @@ class _MyHomePageState extends State<MyHomePage> {
               const SizedBox(height: 24),
             ],
             ElevatedButton.icon(
-              onPressed: _scanning ? _stopScanning : _connectToSensor,
+              onPressed: _scanning
+                  ? _stopScanning
+                  : (_demoMode ? _simulateDemoConnection : _connectToSensor),
               icon: Icon(_scanning ? Icons.stop : Icons.sync),
               label: Text(
                 _scanning ? 'Stop scanning' : 'Update Sensor Settings',
@@ -2033,7 +2175,9 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
             const SizedBox(height: 12),
             ElevatedButton.icon(
-              onPressed: _scanning ? null : _readSensorValues,
+              onPressed: _scanning
+                  ? null
+                  : (_demoMode ? _generateDemoSensorData : _readSensorValues),
               icon: const Icon(Icons.download),
               label: const Text('Read Sensor Values'),
             ),
