@@ -101,19 +101,132 @@ class SensorLogEntry {
   }
 }
 
-// Show Data Page - displays a chart of sensor data over time
-class ShowDataPage extends StatelessWidget {
+// Show Data Page - displays a zoomable chart of sensor data over time
+class ShowDataPage extends StatefulWidget {
   final Map<int, SensorLogEntry> sensorData;
 
   const ShowDataPage({super.key, required this.sensorData});
 
   @override
-  Widget build(BuildContext context) {
-    // Sort entries by timestamp
-    final sortedEntries = sensorData.values.toList()
+  State<ShowDataPage> createState() => _ShowDataPageState();
+}
+
+class _ShowDataPageState extends State<ShowDataPage> {
+  late List<SensorLogEntry> _sortedEntries;
+  late List<FlSpot> _spots;
+  late double _fullMinX;
+  late double _fullMaxX;
+  late double _fullMinY;
+  late double _fullMaxY;
+
+  // Current visible range (zoom/pan state)
+  late double _visMinX;
+  late double _visMaxX;
+  late double _visMinY;
+  late double _visMaxY;
+
+  // Gesture tracking
+  double? _prevScale;
+  Offset? _prevFocalPoint;
+
+  @override
+  void initState() {
+    super.initState();
+    _sortedEntries = widget.sensorData.values.toList()
       ..sort((a, b) => a.unixTimestamp.compareTo(b.unixTimestamp));
 
-    if (sortedEntries.isEmpty) {
+    _spots = _sortedEntries.asMap().entries.map((e) {
+      return FlSpot(e.key.toDouble(), e.value.sensorValue.toDouble());
+    }).toList();
+
+    _fullMinX = 0;
+    _fullMaxX = (_sortedEntries.length - 1).toDouble().clamp(1, double.infinity);
+
+    final minValue = _sortedEntries.isEmpty
+        ? 0
+        : _sortedEntries.map((e) => e.sensorValue).reduce((a, b) => a < b ? a : b);
+    final maxValue = _sortedEntries.isEmpty
+        ? 100
+        : _sortedEntries.map((e) => e.sensorValue).reduce((a, b) => a > b ? a : b);
+    _fullMinY = (minValue * 0.9).floorToDouble();
+    _fullMaxY = (maxValue * 1.1).ceilToDouble();
+    if (_fullMinY == _fullMaxY) _fullMaxY = _fullMinY + 10;
+
+    _visMinX = _fullMinX;
+    _visMaxX = _fullMaxX;
+    _visMinY = _fullMinY;
+    _visMaxY = _fullMaxY;
+  }
+
+  void _onScaleStart(ScaleStartDetails details) {
+    _prevScale = 1.0;
+    _prevFocalPoint = details.localFocalPoint;
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails details, BoxConstraints constraints) {
+    setState(() {
+      final chartW = constraints.maxWidth;
+      final chartH = constraints.maxHeight;
+      final rangeX = _visMaxX - _visMinX;
+      final rangeY = _visMaxY - _visMinY;
+
+      // --- Pan ---
+      if (_prevFocalPoint != null) {
+        final dx = details.localFocalPoint.dx - _prevFocalPoint!.dx;
+        final dy = details.localFocalPoint.dy - _prevFocalPoint!.dy;
+        final panX = -dx / chartW * rangeX;
+        final panY = dy / chartH * rangeY; // inverted: screen Y goes down
+
+        _visMinX = (_visMinX + panX).clamp(_fullMinX, _fullMaxX - 1);
+        _visMaxX = (_visMaxX + panX).clamp(_visMinX + 1, _fullMaxX);
+        _visMinY = (_visMinY + panY).clamp(_fullMinY, _fullMaxY - 1);
+        _visMaxY = (_visMaxY + panY).clamp(_visMinY + 1, _fullMaxY);
+      }
+      _prevFocalPoint = details.localFocalPoint;
+
+      // --- Pinch zoom ---
+      if (_prevScale != null && details.scale != 1.0) {
+        final scaleFactor = _prevScale! / details.scale;
+        // Focal point as fraction of chart area
+        final fx = (details.localFocalPoint.dx / chartW).clamp(0.0, 1.0);
+        final fy = (1.0 - details.localFocalPoint.dy / chartH).clamp(0.0, 1.0);
+
+        final newRangeX = (rangeX * scaleFactor).clamp(5.0, _fullMaxX - _fullMinX);
+        final newRangeY = (rangeY * scaleFactor).clamp(5.0, _fullMaxY - _fullMinY);
+
+        final anchorX = _visMinX + rangeX * fx;
+        final anchorY = _visMinY + rangeY * fy;
+
+        _visMinX = (anchorX - newRangeX * fx).clamp(_fullMinX, _fullMaxX - 5);
+        _visMaxX = _visMinX + newRangeX;
+        if (_visMaxX > _fullMaxX) {
+          _visMaxX = _fullMaxX;
+          _visMinX = _fullMaxX - newRangeX;
+        }
+
+        _visMinY = (anchorY - newRangeY * fy).clamp(_fullMinY, _fullMaxY - 5);
+        _visMaxY = _visMinY + newRangeY;
+        if (_visMaxY > _fullMaxY) {
+          _visMaxY = _fullMaxY;
+          _visMinY = _fullMaxY - newRangeY;
+        }
+      }
+      _prevScale = details.scale;
+    });
+  }
+
+  void _resetZoom() {
+    setState(() {
+      _visMinX = _fullMinX;
+      _visMaxX = _fullMaxX;
+      _visMinY = _fullMinY;
+      _visMaxY = _fullMaxY;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_sortedEntries.isEmpty) {
       return Scaffold(
         appBar: AppBar(
           title: const Text('Sensor Data'),
@@ -125,25 +238,20 @@ class ShowDataPage extends StatelessWidget {
       );
     }
 
-    // Create chart data points
-    final spots = sortedEntries.asMap().entries.map((e) {
-      return FlSpot(e.key.toDouble(), e.value.sensorValue.toDouble());
-    }).toList();
-
-    // Calculate min/max for Y axis
-    final minValue = sortedEntries
-        .map((e) => e.sensorValue)
-        .reduce((a, b) => a < b ? a : b);
-    final maxValue = sortedEntries
-        .map((e) => e.sensorValue)
-        .reduce((a, b) => a > b ? a : b);
-    final yMin = (minValue * 0.9).floorToDouble();
-    final yMax = (maxValue * 1.1).ceilToDouble();
+    final visRangeX = _visMaxX - _visMinX;
+    final visRangeY = _visMaxY - _visMinY;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('Sensor Data (${sortedEntries.length} points)'),
+        title: Text('Sensor Data (${_sortedEntries.length} points)'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.zoom_out_map),
+            tooltip: 'Reset zoom',
+            onPressed: _resetZoom,
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
@@ -151,130 +259,145 @@ class ShowDataPage extends StatelessWidget {
           children: [
             // Time range info
             Text(
-              'From: ${sortedEntries.first.dateTime.toLocal()}',
+              'From: ${_sortedEntries.first.dateTime.toLocal()}',
               style: const TextStyle(fontSize: 12),
             ),
             Text(
-              'To: ${sortedEntries.last.dateTime.toLocal()}',
+              'To: ${_sortedEntries.last.dateTime.toLocal()}',
               style: const TextStyle(fontSize: 12),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 4),
+            Text(
+              'Pinch to zoom · Drag to pan',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 12),
             // Chart
             Expanded(
-              child: LineChart(
-                LineChartData(
-                  gridData: FlGridData(
-                    show: true,
-                    drawVerticalLine: true,
-                    horizontalInterval: (yMax - yMin) / 5,
-                    verticalInterval: sortedEntries.length > 10
-                        ? sortedEntries.length / 5
-                        : 1,
-                  ),
-                  titlesData: FlTitlesData(
-                    show: true,
-                    rightTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
-                    topTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
-                    bottomTitles: AxisTitles(
-                      axisNameWidget: const Text('Time'),
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 50,
-                        interval: sortedEntries.length > 10
-                            ? sortedEntries.length / 5
-                            : 1,
-                        getTitlesWidget: (value, meta) {
-                          final index = value.toInt();
-                          if (index < 0 || index >= sortedEntries.length) {
-                            return const SizedBox.shrink();
-                          }
-                          final entry = sortedEntries[index];
-                          final dt = entry.dateTime.toLocal();
-                          return SideTitleWidget(
-                            axisSide: meta.axisSide,
-                            child: Transform.rotate(
-                              angle: -0.5,
-                              child: Text(
-                                '${dt.month}/${dt.day}\n${dt.hour}:${dt.minute.toString().padLeft(2, '0')}',
-                                style: const TextStyle(fontSize: 9),
-                              ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  return GestureDetector(
+                    onScaleStart: _onScaleStart,
+                    onScaleUpdate: (d) => _onScaleUpdate(d, constraints),
+                    onDoubleTap: _resetZoom,
+                    child: LineChart(
+                      LineChartData(
+                        clipData: const FlClipData.all(),
+                        gridData: FlGridData(
+                          show: true,
+                          drawVerticalLine: true,
+                          horizontalInterval: visRangeY / 5,
+                          verticalInterval: visRangeX > 10
+                              ? visRangeX / 5
+                              : 1,
+                        ),
+                        titlesData: FlTitlesData(
+                          show: true,
+                          rightTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          topTitles: const AxisTitles(
+                            sideTitles: SideTitles(showTitles: false),
+                          ),
+                          bottomTitles: AxisTitles(
+                            axisNameWidget: const Text('Time'),
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              reservedSize: 50,
+                              interval: visRangeX > 10
+                                  ? visRangeX / 5
+                                  : 1,
+                              getTitlesWidget: (value, meta) {
+                                final index = value.toInt();
+                                if (index < 0 || index >= _sortedEntries.length) {
+                                  return const SizedBox.shrink();
+                                }
+                                final entry = _sortedEntries[index];
+                                final dt = entry.dateTime.toLocal();
+                                return SideTitleWidget(
+                                  axisSide: meta.axisSide,
+                                  child: Transform.rotate(
+                                    angle: -0.5,
+                                    child: Text(
+                                      '${dt.month}/${dt.day}\n${dt.hour}:${dt.minute.toString().padLeft(2, '0')}',
+                                      style: const TextStyle(fontSize: 9),
+                                    ),
+                                  ),
+                                );
+                              },
                             ),
-                          );
-                        },
+                          ),
+                          leftTitles: AxisTitles(
+                            axisNameWidget: const Text('µg/m³'),
+                            sideTitles: SideTitles(
+                              showTitles: true,
+                              interval: visRangeY / 5,
+                              reservedSize: 50,
+                              getTitlesWidget: (value, meta) {
+                                return Text(
+                                  value.toInt().toString(),
+                                  style: const TextStyle(fontSize: 10),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                        borderData: FlBorderData(
+                          show: true,
+                          border: Border.all(color: Colors.grey),
+                        ),
+                        minX: _visMinX,
+                        maxX: _visMaxX,
+                        minY: _visMinY,
+                        maxY: _visMaxY,
+                        lineBarsData: [
+                          LineChartBarData(
+                            spots: _spots,
+                            isCurved: true,
+                            curveSmoothness: 0.2,
+                            color: Theme.of(context).colorScheme.primary,
+                            barWidth: 2,
+                            isStrokeCapRound: true,
+                            dotData: FlDotData(show: visRangeX <= 50),
+                            belowBarData: BarAreaData(
+                              show: true,
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.primary.withOpacity(0.2),
+                            ),
+                          ),
+                        ],
+                        lineTouchData: LineTouchData(
+                          touchTooltipData: LineTouchTooltipData(
+                            getTooltipItems: (touchedSpots) {
+                              return touchedSpots.map((spot) {
+                                final index = spot.x.toInt();
+                                if (index < 0 || index >= _sortedEntries.length) {
+                                  return null;
+                                }
+                                final entry = _sortedEntries[index];
+                                return LineTooltipItem(
+                                  '${entry.sensorValue} µg/m³\n${entry.dateTime.toLocal()}',
+                                  const TextStyle(color: Colors.white, fontSize: 12),
+                                );
+                              }).toList();
+                            },
+                          ),
+                        ),
                       ),
                     ),
-                    leftTitles: AxisTitles(
-                      axisNameWidget: const Text('µg/m³'),
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        interval: (yMax - yMin) / 5,
-                        reservedSize: 50,
-                        getTitlesWidget: (value, meta) {
-                          return Text(
-                            value.toInt().toString(),
-                            style: const TextStyle(fontSize: 10),
-                          );
-                        },
-                      ),
-                    ),
-                  ),
-                  borderData: FlBorderData(
-                    show: true,
-                    border: Border.all(color: Colors.grey),
-                  ),
-                  minX: 0,
-                  maxX: (sortedEntries.length - 1).toDouble(),
-                  minY: yMin,
-                  maxY: yMax,
-                  lineBarsData: [
-                    LineChartBarData(
-                      spots: spots,
-                      isCurved: true,
-                      curveSmoothness: 0.2,
-                      color: Theme.of(context).colorScheme.primary,
-                      barWidth: 2,
-                      isStrokeCapRound: true,
-                      dotData: FlDotData(show: sortedEntries.length <= 50),
-                      belowBarData: BarAreaData(
-                        show: true,
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.primary.withOpacity(0.2),
-                      ),
-                    ),
-                  ],
-                  lineTouchData: LineTouchData(
-                    touchTooltipData: LineTouchTooltipData(
-                      getTooltipItems: (touchedSpots) {
-                        return touchedSpots.map((spot) {
-                          final index = spot.x.toInt();
-                          if (index < 0 || index >= sortedEntries.length) {
-                            return null;
-                          }
-                          final entry = sortedEntries[index];
-                          return LineTooltipItem(
-                            '${entry.sensorValue} µg/m³\n${entry.dateTime.toLocal()}',
-                            const TextStyle(color: Colors.white, fontSize: 12),
-                          );
-                        }).toList();
-                      },
-                    ),
-                  ),
-                ),
+                  );
+                },
               ),
             ),
             const SizedBox(height: 16),
             // Data list
             Expanded(
               child: ListView.builder(
-                itemCount: sortedEntries.length,
+                itemCount: _sortedEntries.length,
                 itemBuilder: (context, index) {
                   final entry =
-                      sortedEntries[sortedEntries.length -
+                      _sortedEntries[_sortedEntries.length -
                           1 -
                           index]; // Newest first
                   return ListTile(
@@ -287,7 +410,7 @@ class ShowDataPage extends StatelessWidget {
                       '${entry.dateTime.toLocal()}${entry.rtcValid ? '' : ' (RTC invalid)'}',
                     ),
                     leading: Text(
-                      '${sortedEntries.length - index}',
+                      '${_sortedEntries.length - index}',
                       style: const TextStyle(color: Colors.grey),
                     ),
                   );
